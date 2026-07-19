@@ -1,0 +1,90 @@
+import os
+import requests
+import geopandas as gpd
+import osmnx as ox
+from shapely.geometry import Polygon
+
+def get_osm_vector_data(center_lon, center_lat, radius_m, output_dir, log_callback=None):
+    """获取 OSM 矢量数据"""
+    def log(msg):
+        if log_callback:
+            log_callback(msg)
+        else:
+            print(msg)
+    point = (center_lat, center_lon)
+    # 路网
+    try:
+        G = ox.graph_from_point(point, dist=radius_m, network_type='drive')
+        if G.number_of_nodes() > 0:
+            nodes, edges = ox.graph_to_gdfs(G)
+            if not edges.empty:
+                edges.to_file(os.path.join(output_dir, "roads.geojson"), driver="GeoJSON")
+            else:
+                log("  路网数据为空，跳过保存")
+        else:
+            log("  未找到路网数据")
+    except Exception as e:
+        log(f"  获取路网数据失败: {e}")
+    # 建筑
+    try:
+        buildings = ox.features_from_point(point, tags={"building": True}, dist=radius_m)
+        if not buildings.empty:
+            buildings.to_file(os.path.join(output_dir, "buildings.geojson"), driver="GeoJSON")
+        else:
+            log("  未找到建筑物数据")
+    except Exception as e:
+        log(f"  获取建筑物数据失败: {e}")
+    # 绿地
+    try:
+        green_tags = {
+            "landuse": ["grass", "forest", "recreation_ground", "meadow", "allotments"],
+            "leisure": ["park", "garden", "nature_reserve", "golf_course", "playground"],
+            "natural": ["grassland", "wood", "heath", "scrub"]
+        }
+        green = ox.features_from_point(point, tags=green_tags, dist=radius_m)
+        if not green.empty:
+            green.to_file(os.path.join(output_dir, "green_spaces.geojson"), driver="GeoJSON")
+        else:
+            log("  未找到绿地数据")
+    except Exception as e:
+        log(f"  获取绿地数据失败: {e}")
+    # 水体
+    overpass_url = "http://overpass-api.de/api/interpreter"
+    query = f"""
+    [out:json][timeout:25];
+    (
+      way["natural"="water"](around:{radius_m},{center_lat},{center_lon});
+      way["waterway"="river"](around:{radius_m},{center_lat},{center_lon});
+      relation["natural"="water"](around:{radius_m},{center_lat},{center_lon});
+    );
+    out body;
+    >;
+    out skel qt;
+    """
+    try:
+        resp = requests.get(overpass_url, params={"data": query}, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            features = data.get("elements", [])
+            geom_list = []
+            for feat in features:
+                if feat["type"] == "way" and "geometry" in feat:
+                    coords = []
+                    valid = True
+                    for p in feat["geometry"]:
+                        try:
+                            coords.append((float(p["lon"]), float(p["lat"])))
+                        except (ValueError, TypeError, KeyError):
+                            valid = False
+                            break
+                    if valid and len(coords) >= 3:
+                        geom_list.append(Polygon(coords))
+            if geom_list:
+                gdf = gpd.GeoDataFrame(geometry=geom_list, crs="EPSG:4326")
+                gdf.to_file(os.path.join(output_dir, "water_bodies.geojson"), driver="GeoJSON")
+            else:
+                log("  未找到有效水体数据")
+        else:
+            log(f"  水体请求失败，状态码: {resp.status_code}")
+    except Exception as e:
+        log(f"  获取水体数据时出错: {e}")
