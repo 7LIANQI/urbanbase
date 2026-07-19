@@ -462,26 +462,26 @@ class MapWidget(QWidget):
             print(f"GeoJSON 要素数量: {len(features)}")
             
             lons, lats = [], []
-            for feat in features[:50]: # 只取前10个计算中心，避免卡顿
+            for feat in features[:50]:  # 只取前50个计算中心，避免卡顿
                 geom = feat.get('geometry', {})
                 geo_type = geom.get('type')
                 coords = geom.get('coordinates', [])
-                
-            if geo_type == 'Point':
-                    lons.append(coords[0]); lats.append(coords[1])
-            elif geo_type in ['LineString', 'MultiLineString']:
-                    # LineString 是 [[lon, lat], ...]
-                    # MultiLineString 是 [[[lon, lat], ...], ...]
-                lines = coords if geo_type == 'LineString' else [c for line in coords for c in line]
-                for c in lines:
-                    if len(c) >= 2:
-                        lons.append(c[0]); lats.append(c[1])
-            elif geo_type in ['Polygon', 'MultiPolygon']:
-                # Polygon 是 [[[lon, lat], ...]]
-                polys = coords[0] if geo_type == 'Polygon' else [c for poly in coords for c in poly[0]]
-                for c in polys:
-                    if len(c) >= 2:
-                        lons.append(c[0]); lats.append(c[1])
+
+                if geo_type == 'Point':
+                    lons.append(coords[0])
+                    lats.append(coords[1])
+                elif geo_type in ('LineString', 'MultiLineString'):
+                    lines = coords if geo_type == 'LineString' else [c for line in coords for c in line]
+                    for c in lines:
+                        if len(c) >= 2:
+                            lons.append(c[0])
+                            lats.append(c[1])
+                elif geo_type in ('Polygon', 'MultiPolygon'):
+                    polys = coords[0] if geo_type == 'Polygon' else [c for poly in coords for c in poly[0]]
+                    for c in polys:
+                        if len(c) >= 2:
+                            lons.append(c[0])
+                            lats.append(c[1])
             
             if lons and lats:
                 center_lat = sum(lats) / len(lats)

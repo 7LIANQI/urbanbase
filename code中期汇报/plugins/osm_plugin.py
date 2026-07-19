@@ -1,22 +1,25 @@
+"""OSM 矢量数据插件：路网、建筑、绿地、水体。"""
 import os
+
 import requests
 import geopandas as gpd
 import osmnx as ox
 from shapely.geometry import Polygon
 
+from utils import make_logger
+from config import OVERPASS_URL
+
+
 def get_osm_vector_data(center_lon, center_lat, radius_m, output_dir, log_callback=None):
-    """获取 OSM 矢量数据"""
-    def log(msg):
-        if log_callback:
-            log_callback(msg)
-        else:
-            print(msg)
+    """获取 OSM 矢量数据（路网、建筑、绿地、水体）。"""
+    log = make_logger(log_callback)
     point = (center_lat, center_lon)
-    # 路网
+
+    # ---- 路网 ----
     try:
         G = ox.graph_from_point(point, dist=radius_m, network_type='drive')
         if G.number_of_nodes() > 0:
-            nodes, edges = ox.graph_to_gdfs(G)
+            _nodes, edges = ox.graph_to_gdfs(G)
             if not edges.empty:
                 edges.to_file(os.path.join(output_dir, "roads.geojson"), driver="GeoJSON")
             else:
@@ -25,7 +28,8 @@ def get_osm_vector_data(center_lon, center_lat, radius_m, output_dir, log_callba
             log("  未找到路网数据")
     except Exception as e:
         log(f"  获取路网数据失败: {e}")
-    # 建筑
+
+    # ---- 建筑 ----
     try:
         buildings = ox.features_from_point(point, tags={"building": True}, dist=radius_m)
         if not buildings.empty:
@@ -34,12 +38,13 @@ def get_osm_vector_data(center_lon, center_lat, radius_m, output_dir, log_callba
             log("  未找到建筑物数据")
     except Exception as e:
         log(f"  获取建筑物数据失败: {e}")
-    # 绿地
+
+    # ---- 绿地 ----
     try:
         green_tags = {
             "landuse": ["grass", "forest", "recreation_ground", "meadow", "allotments"],
             "leisure": ["park", "garden", "nature_reserve", "golf_course", "playground"],
-            "natural": ["grassland", "wood", "heath", "scrub"]
+            "natural": ["grassland", "wood", "heath", "scrub"],
         }
         green = ox.features_from_point(point, tags=green_tags, dist=radius_m)
         if not green.empty:
@@ -48,8 +53,8 @@ def get_osm_vector_data(center_lon, center_lat, radius_m, output_dir, log_callba
             log("  未找到绿地数据")
     except Exception as e:
         log(f"  获取绿地数据失败: {e}")
-    # 水体
-    overpass_url = "http://overpass-api.de/api/interpreter"
+
+    # ---- 水体 (Overpass API) ----
     query = f"""
     [out:json][timeout:25];
     (
@@ -62,7 +67,7 @@ def get_osm_vector_data(center_lon, center_lat, radius_m, output_dir, log_callba
     out skel qt;
     """
     try:
-        resp = requests.get(overpass_url, params={"data": query}, timeout=30)
+        resp = requests.get(OVERPASS_URL, params={"data": query}, timeout=30)
         if resp.status_code == 200:
             data = resp.json()
             features = data.get("elements", [])

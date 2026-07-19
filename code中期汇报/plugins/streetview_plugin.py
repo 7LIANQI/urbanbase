@@ -1,25 +1,22 @@
-# streetview_plugin.py  （百度街景/全景静态图版本）
+"""百度街景/全景静态图插件。"""
 import os
 import requests
 
-# 百度全景静态图 API
-BAIDU_PANORAMA_URL = "https://api.map.baidu.com/panorama/v2"
+from utils import make_logger
+from config import BAIDU_PANORAMA_URL
 
-def _lnglat_str(lon, lat, coordtype: str = "wgs84ll") -> str:
+
+def _lnglat_str(lon, lat):
     return f"{float(lon)},{float(lat)}"
 
 
 def get_streetview_metadata(lon, lat, ak, log_callback=None, *, coordtype="wgs84ll"):
-    def log(msg):
-        if log_callback:
-            log_callback(msg)
-        else:
-            print(msg)
+    """探测指定坐标是否有百度街景覆盖。"""
+    log = make_logger(log_callback)
 
-    location = _lnglat_str(lon, lat, coordtype)
     params = {
         "ak": ak,
-        "location": location,
+        "location": _lnglat_str(lon, lat),
         "width": 64,
         "height": 64,
         "heading": 0,
@@ -35,7 +32,6 @@ def get_streetview_metadata(lon, lat, ak, log_callback=None, *, coordtype="wgs84
         if r.status_code == 200 and "image" in ct:
             return True
         else:
-            # 常见：该点无街景，会返回小图/状态码/非image
             log(f"百度街景探测：无覆盖或返回非图片 content-type={ct}")
             return False
     except Exception as e:
@@ -43,19 +39,14 @@ def get_streetview_metadata(lon, lat, ak, log_callback=None, *, coordtype="wgs84
         return False
 
 
-def download_streetview_image(
-    lon, lat, heading, pitch, ak, save_path, log_callback=None, *, coordtype="wgs84ll"
-):
-    def log(msg):
-        if log_callback:
-            log_callback(msg)
-        else:
-            print(msg)
+def download_streetview_image(lon, lat, heading, pitch, ak, save_path,
+                              log_callback=None, *, coordtype="wgs84ll"):
+    """下载指定方向的百度街景图片。"""
+    log = make_logger(log_callback)
 
-    location = _lnglat_str(lon, lat, coordtype)
     params = {
         "ak": ak,
-        "location": location,
+        "location": _lnglat_str(lon, lat),
         "width": 640,
         "height": 480,
         "heading": int(heading),
