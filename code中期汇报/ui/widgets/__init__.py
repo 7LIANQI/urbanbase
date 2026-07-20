@@ -5,6 +5,7 @@ from .weather_widget import WeatherWidget
 from .streetview_widget import StreetViewWidget
 from .chart_widget import ChartWidget
 from .map_widget import MapWidget
+from .stats_widget import StatsWidget
 
 __all__ = [
     "AirQualityWidget",
@@ -12,4 +13,5 @@ __all__ = [
     "StreetViewWidget",
     "ChartWidget",
     "MapWidget",
+    "StatsWidget",
 ]

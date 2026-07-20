@@ -298,11 +298,17 @@ def get_era5_climate_stats(roi_geometry, start_date, end_date, output_dir,
             return
 
         df = pd.DataFrame(records)
-        df.columns = [
-            '日均气温_C', '日最高气温_C', '日最低气温_C',
-            '日均相对湿度_pct', '太阳辐射日均_Wm2', '太阳辐射峰值_Wm2',
-            '日照时数_h', 'Date',
-        ]
+        # 使用显式映射，避免 getInfo 返回键顺序不一致导致列名错位
+        column_map = {
+            'temp_mean': '日均气温_C',
+            'temp_max': '日最高气温_C',
+            'temp_min': '日最低气温_C',
+            'humidity_mean': '日均相对湿度_pct',
+            'solar_mean': '太阳辐射日均_Wm2',
+            'solar_max': '太阳辐射峰值_Wm2',
+            'sun_hours': '日照时数_h',
+        }
+        df = df.rename(columns=column_map)
         # 确保 Date 在第一列
         cols = ['Date', '日均气温_C', '日最高气温_C', '日最低气温_C',
                 '日均相对湿度_pct', '太阳辐射日均_Wm2', '太阳辐射峰值_Wm2', '日照时数_h']
@@ -357,7 +363,7 @@ def get_era5_hourly_stats(roi_geometry, target_date, output_dir,
             scale=11132, maxPixels=1e9,
         )
         return ee.Feature(None, stats).set({
-            'Hour': img.date().getRelative('hour'),
+            'Hour': img.date().getRelative('hour', 'day'),
             'Datetime': img.date().format('YYYY-MM-dd HH:mm'),
         })
 
@@ -388,3 +394,237 @@ def get_era5_hourly_stats(roi_geometry, target_date, output_dir,
         log(f"  逐时数据已保存（{len(df)} 条）")
     except Exception as e:
         log(f"  逐时数据处理出错: {e}")
+
+
+# ===================== 新增 GEE 数据采集函数 =====================
+
+def get_elevation_stats(roi_geometry, output_dir, log_callback=None):
+    """获取 SRTM 海拔数据（均值/最小/最大/中位数/标准差）。
+
+    数据集: USGS/SRTMGL1_003 (30m 分辨率)
+    输出: elevation_stats.csv
+    """
+    log = make_logger(log_callback)
+    log("  获取 SRTM 海拔数据...")
+
+    try:
+        dem = ee.Image("USGS/SRTMGL1_003")
+        elev_reducer = (
+            ee.Reducer.mean()
+            .combine(ee.Reducer.minMax(), sharedInputs=True)
+            .combine(ee.Reducer.median(), sharedInputs=True)
+            .combine(ee.Reducer.sampleStdDev(), sharedInputs=True)
+        )
+        stats = dem.reduceRegion(
+            reducer=elev_reducer,
+            geometry=roi_geometry,
+            scale=30,
+            maxPixels=1e9,
+        ).getInfo()
+
+        if stats and stats.get('elevation_mean') is not None:
+            record = {
+                '海拔均值_m': round(stats.get('elevation_mean', 0), 1),
+                '海拔最小值_m': round(stats.get('elevation_min', 0), 1),
+                '海拔最大值_m': round(stats.get('elevation_max', 0), 1),
+                '海拔中位数_m': round(stats.get('elevation_median', 0), 1),
+                '海拔标准差_m': round(stats.get('elevation_stdDev', 0), 1),
+            }
+            df = pd.DataFrame([record])
+            df.to_csv(os.path.join(output_dir, "elevation_stats.csv"), index=False)
+            log(f"  海拔数据已保存（均值: {record['海拔均值_m']}m）")
+        else:
+            log("  海拔数据为空，跳过")
+    except Exception as e:
+        log(f"  海拔数据处理出错: {e}")
+
+
+def get_precipitation_stats(roi_geometry, start_date, end_date, output_dir,
+                            log_callback=None):
+    """获取 CHIRPS 逐日降水数据时间序列。
+
+    数据集: UCSB-CHG/CHIRPS/DAILY (约 5.5km 分辨率)
+    输出: precipitation_stats.csv（每日降水量 mm）
+    """
+    log = make_logger(log_callback)
+    log("  获取 CHIRPS 降水数据...")
+
+    try:
+        chirps = (
+            ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
+            .filterBounds(roi_geometry)
+            .filterDate(start_date, end_date)
+            .select('precipitation')
+        )
+
+        def calc_precip(img):
+            stats = img.reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=roi_geometry,
+                scale=5566,
+                maxPixels=1e9,
+            )
+            return ee.Feature(None, stats).set({
+                'Date': img.date().format('YYYY-MM-dd'),
+            })
+
+        feats = chirps.map(calc_precip).getInfo()
+        records = [
+            f['properties'] for f in feats.get('features', [])
+            if f.get('properties', {}).get('precipitation') is not None
+        ]
+
+        if records:
+            df = pd.DataFrame(records)
+            df = df[['Date', 'precipitation']]
+            df.columns = ['Date', '降水量_mm']
+            df['降水量_mm'] = df['降水量_mm'].round(2)
+            df.to_csv(os.path.join(output_dir, "precipitation_stats.csv"), index=False)
+            log(f"  降水数据已保存（{len(df)} 天）")
+        else:
+            log("  降水数据为空，跳过")
+    except Exception as e:
+        log(f"  降水数据处理出错: {e}")
+
+
+def get_ndwi_evi_stats(roi_geometry, start_date, end_date, output_dir,
+                       log_callback=None):
+    """从 Sentinel-2 计算 NDWI 和 EVI 时间序列。
+
+    NDWI (McFeeters): (Green - NIR) / (Green + NIR) = (B3 - B8) / (B3 + B8)
+    EVI: 2.5 * ((B8 - B4) / (B8 + 6*B4 - 7.5*B2 + 1))
+
+    输出: ndwi_stats.csv, evi_stats.csv
+    """
+    log = make_logger(log_callback)
+
+    s2 = (
+        ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+        .filterBounds(roi_geometry)
+        .filterDate(start_date, end_date)
+        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    )
+
+    def add_indices(img):
+        # NDWI: (Green - NIR) / (Green + NIR)
+        ndwi = img.normalizedDifference(['B3', 'B8']).rename('NDWI')
+        # EVI: 2.5 * ((NIR - Red) / (NIR + 6*Red - 7.5*Blue + 1))
+        evi = img.expression(
+            '2.5 * ((B8 - B4) / (B8 + 6 * B4 - 7.5 * B2 + 1))',
+            {
+                'B8': img.select('B8').toFloat(),
+                'B4': img.select('B4').toFloat(),
+                'B2': img.select('B2').toFloat(),
+            },
+        ).rename('EVI')
+        return img.addBands([ndwi, evi])
+
+    s2_indices = s2.map(add_indices).select(['NDWI', 'EVI'])
+
+    def calc_indices(img):
+        stats = img.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=roi_geometry,
+            scale=10,
+            maxPixels=1e9,
+        )
+        return ee.Feature(None, stats).set({
+            'Date': img.date().format('YYYY-MM-dd'),
+        })
+
+    # ---- NDWI ----
+    try:
+        log("  计算 Sentinel-2 NDWI...")
+        ndwi_feats = s2_indices.select('NDWI').map(calc_indices).getInfo()
+        ndwi_records = [
+            f['properties'] for f in ndwi_feats.get('features', [])
+            if f.get('properties', {}).get('NDWI') is not None
+        ]
+        if ndwi_records:
+            ndwi_df = pd.DataFrame(ndwi_records)
+            ndwi_df = ndwi_df[['Date', 'NDWI']]
+            ndwi_df.columns = ['Date', '区域NDWI均值']
+            ndwi_df['区域NDWI均值'] = ndwi_df['区域NDWI均值'].round(4)
+            ndwi_df.to_csv(os.path.join(output_dir, "ndwi_stats.csv"), index=False)
+            log(f"  NDWI 数据已保存（{len(ndwi_df)} 景）")
+        else:
+            log("  NDWI 无有效数据，跳过")
+    except Exception as e:
+        log(f"  NDWI 处理出错: {e}")
+
+    # ---- EVI ----
+    try:
+        log("  计算 Sentinel-2 EVI...")
+        evi_feats = s2_indices.select('EVI').map(calc_indices).getInfo()
+        evi_records = [
+            f['properties'] for f in evi_feats.get('features', [])
+            if f.get('properties', {}).get('EVI') is not None
+        ]
+        if evi_records:
+            evi_df = pd.DataFrame(evi_records)
+            evi_df = evi_df[['Date', 'EVI']]
+            evi_df.columns = ['Date', '区域EVI均值']
+            evi_df['区域EVI均值'] = evi_df['区域EVI均值'].round(4)
+            evi_df.to_csv(os.path.join(output_dir, "evi_stats.csv"), index=False)
+            log(f"  EVI 数据已保存（{len(evi_df)} 景）")
+        else:
+            log("  EVI 无有效数据，跳过")
+    except Exception as e:
+        log(f"  EVI 处理出错: {e}")
+
+
+def get_population_stats(roi_geometry, output_dir, log_callback=None):
+    """获取 WorldPop 人口密度数据。
+
+    数据集: WorldPop/GP/100m/pop (100m 分辨率)
+    使用 2020 年数据（最常用年份），统计 ROI 内总人口和平均人口密度。
+
+    输出: population_stats.csv
+    """
+    log = make_logger(log_callback)
+    log("  获取 WorldPop 人口密度数据...")
+
+    try:
+        # WorldPop 2020 全球人口计数
+        pop = ee.ImageCollection("WorldPop/GP/100m/pop")
+        # 取 2020 年影像
+        pop_2020 = pop.filterDate('2020-01-01', '2020-12-31').first()
+
+        if pop_2020 is None:
+            log("  WorldPop 2020 数据不可用，跳过")
+            return
+
+        # 计算 ROI 面积 (km²) 用于推算人口密度
+        area_sq_m = roi_geometry.area(1).getInfo()
+        area_sq_km = area_sq_m / 1e6 if area_sq_m else 1
+
+        pop_reducer = (
+            ee.Reducer.sum()
+            .combine(ee.Reducer.mean(), sharedInputs=True)
+            .combine(ee.Reducer.max(), sharedInputs=True)
+        )
+        stats = pop_2020.select('population').reduceRegion(
+            reducer=pop_reducer,
+            geometry=roi_geometry,
+            scale=100,
+            maxPixels=1e9,
+        ).getInfo()
+
+        if stats:
+            total_pop = stats.get('population_sum', 0) or 0
+            mean_density = stats.get('population_mean', 0) or 0  # 人均/像素 (100m²)
+            max_density = stats.get('population_max', 0) or 0
+
+            record = {
+                '总人口估算': round(total_pop, 1),
+                '平均人口密度_人每平方千米': round(mean_density * 100, 1),  # 100m像素 → 1km²
+                '最大人口密度_人每平方千米': round(max_density * 100, 1),
+                'ROI面积_km2': round(area_sq_km, 3),
+            }
+            df = pd.DataFrame([record])
+            df.to_csv(os.path.join(output_dir, "population_stats.csv"), index=False)
+            log(f"  人口数据已保存（估算总人口: {record['总人口估算']:.0f}）")
+        else:
+            log("  人口数据为空，跳过")
+    except Exception as e:
+        log(f"  人口数据处理出错: {e}")

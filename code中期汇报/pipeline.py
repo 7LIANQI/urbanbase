@@ -17,7 +17,12 @@ from plugins import (
     get_gee_stats,
     get_era5_climate_stats,
     get_era5_hourly_stats,
+    get_elevation_stats,
+    get_precipitation_stats,
+    get_ndwi_evi_stats,
+    get_population_stats,
     get_osm_vector_data,
+    compute_osm_stats,
 )
 
 
@@ -156,6 +161,25 @@ def process_location(lon, lat, radius=500, start_date=None, end_date=None,
             index["files"]["ndvi_stats"] = os.path.join(out_dir, "ndvi_stats.csv")
             index["files"]["lst_stats"] = os.path.join(out_dir, "lst_stats.csv")
 
+            # 新增: 海拔
+            get_elevation_stats(roi_geometry, out_dir, log_callback=log_callback)
+            index["files"]["elevation_stats"] = os.path.join(out_dir, "elevation_stats.csv")
+
+            # 新增: 降水
+            get_precipitation_stats(roi_geometry, start_date, end_date, out_dir,
+                                    log_callback=log_callback)
+            index["files"]["precipitation_stats"] = os.path.join(out_dir, "precipitation_stats.csv")
+
+            # 新增: NDWI + EVI
+            get_ndwi_evi_stats(roi_geometry, start_date, end_date, out_dir,
+                               log_callback=log_callback)
+            index["files"]["ndwi_stats"] = os.path.join(out_dir, "ndwi_stats.csv")
+            index["files"]["evi_stats"] = os.path.join(out_dir, "evi_stats.csv")
+
+            # 新增: 人口密度
+            get_population_stats(roi_geometry, out_dir, log_callback=log_callback)
+            index["files"]["population_stats"] = os.path.join(out_dir, "population_stats.csv")
+
             log("计算 ERA5 气候逐日数据...")
             get_era5_climate_stats(roi_geometry, start_date, end_date, out_dir,
                                    log_callback=log_callback)
@@ -182,6 +206,11 @@ def process_location(lon, lat, radius=500, start_date=None, end_date=None,
         index["files"]["osm_buildings"] = os.path.join(out_dir, "buildings.geojson")
         index["files"]["osm_green_spaces"] = os.path.join(out_dir, "green_spaces.geojson")
         index["files"]["osm_water_bodies"] = os.path.join(out_dir, "water_bodies.geojson")
+
+        # 新增: 计算 OSM 统计指标（建筑/路网/绿地）
+        log("计算 OSM 统计指标...")
+        compute_osm_stats(out_dir, radius, log_callback=log_callback)
+        index["files"]["osm_stats"] = os.path.join(out_dir, "osm_stats.json")
     else:
         log("⏭️ OSM 矢量数据模块已禁用")
 

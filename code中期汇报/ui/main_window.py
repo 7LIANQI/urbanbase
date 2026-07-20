@@ -24,6 +24,7 @@ from .widgets import (
     StreetViewWidget,
     ChartWidget,
     MapWidget,
+    StatsWidget,
 )
 from utils import FileLogger
 
@@ -81,12 +82,14 @@ class ResultDialog(QDialog):
         self.map_view = MapWidget()
         self.air_quality_view = AirQualityWidget()
         self.weather_view = WeatherWidget()
+        self.stats_view = StatsWidget()
 
         self.tab_widget.addTab(self.street_view, "📸 街景展示")
         self.tab_widget.addTab(self.chart_view, "📊 遥感图表")
         self.tab_widget.addTab(self.map_view, "🗺️ 地图展示")
         self.tab_widget.addTab(self.air_quality_view, "🌬️ 空气质量")
         self.tab_widget.addTab(self.weather_view, "🌤️ 气象数据")
+        self.tab_widget.addTab(self.stats_view, "📋 综合统计")
         layout.addWidget(self.tab_widget)
 
         # 导航栏
@@ -141,6 +144,7 @@ class MainWindow(QWidget):
         self.map_view = self.result_dialog.map_view
         self.air_quality_view = self.result_dialog.air_quality_view
         self.weather_view = self.result_dialog.weather_view
+        self.stats_view = self.result_dialog.stats_view
         self.result_label = self.result_dialog.result_label
 
         self._init_ui()
@@ -465,6 +469,7 @@ class MainWindow(QWidget):
         self.map_view.set_enabled(enable_osm)
         self.air_quality_view.set_enabled(enable_air)
         self.weather_view.set_enabled(enable_air)
+        self.stats_view.set_enabled(enable_gee or enable_osm)
 
         # 输出目录
         output_base = self.output_dir_input.text().strip() or None
@@ -589,13 +594,53 @@ class MainWindow(QWidget):
 
         # 遥感数据
         for label, csv_name in [("NDVI", "ndvi_stats.csv"),
+                                 ("EVI", "evi_stats.csv"),
+                                 ("NDWI", "ndwi_stats.csv"),
                                  ("地表温度", "lst_stats.csv"),
-                                 ("夜光强度", "viirs_stats.csv")]:
+                                 ("夜光强度", "viirs_stats.csv"),
+                                 ("降水量", "precipitation_stats.csv")]:
             csv_path = os.path.join(current_dir, csv_name)
             if os.path.exists(csv_path):
                 df = pd.read_csv(csv_path)
                 report_lines.append(f"<h3>📈 {label}</h3>")
                 report_lines.append(df.tail(10).to_html(index=False, border=1))
+
+        # 海拔和人口统计（单行数据）
+        for label, csv_name in [("海拔", "elevation_stats.csv"),
+                                 ("人口密度", "population_stats.csv")]:
+            csv_path = os.path.join(current_dir, csv_name)
+            if os.path.exists(csv_path):
+                df = pd.read_csv(csv_path)
+                report_lines.append(f"<h3>📊 {label}</h3>")
+                report_lines.append(df.to_html(index=False, border=1))
+
+        # OSM 统计指标
+        osm_stats_path = os.path.join(current_dir, "osm_stats.json")
+        if os.path.exists(osm_stats_path):
+            with open(osm_stats_path, 'r', encoding='utf-8') as f:
+                osm_s = json.load(f)
+            report_lines.append("<h3>🏗️ OSM 统计指标</h3>")
+            bld = osm_s.get("buildings", {})
+            if bld:
+                report_lines.append(
+                    f"<p>🏠 <b>建筑:</b> {bld.get('建筑数量', 'N/A')} 栋, "
+                    f"总面积 {bld.get('建筑总面积_m2', 'N/A'):,.0f} m², "
+                    f"覆盖率 {bld.get('建筑覆盖率_pct', 'N/A')}%</p>"
+                )
+            rd = osm_s.get("roads", {})
+            if rd:
+                report_lines.append(
+                    f"<p>🛣️ <b>路网:</b> 总长 {rd.get('道路总长度_km', 'N/A')} km, "
+                    f"密度 {rd.get('路网密度_km_per_km2', 'N/A')} km/km², "
+                    f"交叉口 {rd.get('交叉口数量', 'N/A')} 个</p>"
+                )
+            gr = osm_s.get("green_spaces", {})
+            if gr:
+                report_lines.append(
+                    f"<p>🌿 <b>绿地:</b> 面积 {gr.get('绿地总面积_m2', 'N/A'):,.0f} m², "
+                    f"覆盖率 {gr.get('绿地覆盖率_pct', 'N/A')}%, "
+                    f"体积估算 {gr.get('绿地体积估算_m3', 'N/A'):,.0f} m³</p>"
+                )
 
         # OSM 数据
         for label, geo_name in [("路网", "roads.geojson"),
@@ -655,6 +700,7 @@ class MainWindow(QWidget):
         self.map_view.set_output_dir(current_dir)
         self.air_quality_view.set_output_dir(current_dir)
         self.weather_view.set_output_dir(current_dir)
+        self.stats_view.set_output_dir(current_dir)
 
     def _show_prev(self):
         if self.output_dirs:

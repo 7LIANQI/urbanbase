@@ -3,7 +3,6 @@
 # ---------- API 端点 ----------
 OPENWEATHER_AIR_POLLUTION_URL = "https://api.openweathermap.org/data/2.5/air_pollution"
 BAIDU_PANORAMA_URL = "https://api.map.baidu.com/panorama/v2"
-OVERPASS_URL = "http://overpass-api.de/api/interpreter"
 
 # ---------- 遥感常量 ----------
 LST_SCALE = 0.00341802       # Landsat ST_B10 缩放系数

@@ -3,8 +3,17 @@
 from .air_quality_plugin import get_air_quality_by_lonlat
 from .weather_plugin import get_weather_by_lonlat
 from .streetview_plugin import get_streetview_metadata, download_streetview_image
-from .gee_plugin import initialize_gee, get_gee_stats, get_era5_climate_stats, get_era5_hourly_stats
-from .osm_plugin import get_osm_vector_data
+from .gee_plugin import (
+    initialize_gee,
+    get_gee_stats,
+    get_era5_climate_stats,
+    get_era5_hourly_stats,
+    get_elevation_stats,
+    get_precipitation_stats,
+    get_ndwi_evi_stats,
+    get_population_stats,
+)
+from .osm_plugin import get_osm_vector_data, compute_osm_stats
 
 __all__ = [
     "get_air_quality_by_lonlat",
@@ -14,5 +23,11 @@ __all__ = [
     "initialize_gee",
     "get_gee_stats",
     "get_era5_climate_stats",
+    "get_era5_hourly_stats",
+    "get_elevation_stats",
+    "get_precipitation_stats",
+    "get_ndwi_evi_stats",
+    "get_population_stats",
     "get_osm_vector_data",
+    "compute_osm_stats",
 ]
