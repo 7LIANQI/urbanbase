@@ -1,8 +1,12 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "urban-analytics"
 version = "0.1.0"
 description = "面向城市街道环境的大数据采集与分析平台"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 dependencies = [
     "earthengine-api>=1.7.26",
     "folium>=0.19",
@@ -15,3 +19,13 @@ dependencies = [
     "requests>=2.34.2",
     "shapely>=2.0",
 ]
+
+[project.optional-dependencies]
+# 遥感模块依赖较重，可作为可选
+remote-sensing = ["earthengine-api>=1.7.26"]
+
+[project.scripts]
+urban-analytics = "app:main"    # 需要 app.py 中定义 main()
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

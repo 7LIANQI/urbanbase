@@ -1,7 +1,7 @@
 """数据采集 Worker 线程。"""
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from main1 import process_location
+from pipeline import process_location
 
 
 class Worker(QThread):
@@ -13,7 +13,8 @@ class Worker(QThread):
     result_ready = pyqtSignal(str)
 
     def __init__(self, tasks, map_key, rs_key, gee_key_path,
-                 enable_air, enable_street, enable_gee, enable_osm):
+                 enable_air, enable_street, enable_gee, enable_osm,
+                 file_logger=None, output_base_dir=None, proxy_config=None):
         super().__init__()
         self.tasks = tasks
         self.map_key = map_key
@@ -23,7 +24,16 @@ class Worker(QThread):
         self.enable_street = enable_street
         self.enable_gee = enable_gee
         self.enable_osm = enable_osm
+        self._file_logger = file_logger
+        self._output_base_dir = output_base_dir
+        self._proxy_config = proxy_config
         self._is_running = True
+
+    def _emit_log(self, msg):
+        """将日志消息转发到 GUI 和文件日志。"""
+        self.log.emit(msg)
+        if self._file_logger:
+            self._file_logger(msg)
 
     def run(self):
         output_dirs = []
@@ -36,9 +46,6 @@ class Worker(QThread):
 
             self.log.emit(f"▶ 开始处理：经度 {lon}, 纬度 {lat}")
             try:
-                def log_callback(msg):
-                    self.log.emit(msg)
-
                 out_dir = process_location(
                     lon, lat, r, sd, ed,
                     baidu_key=self.map_key,
@@ -48,7 +55,9 @@ class Worker(QThread):
                     enable_streetview=self.enable_street,
                     enable_gee=self.enable_gee,
                     enable_osm=self.enable_osm,
-                    log_callback=log_callback,
+                    log_callback=self._emit_log,
+                    output_base_dir=self._output_base_dir,
+                    proxy_config=self._proxy_config,
                 )
                 output_dirs.append(out_dir)
                 self.result_ready.emit(out_dir)

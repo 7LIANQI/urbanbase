@@ -1,4 +1,8 @@
-"""百度街景/全景静态图插件。"""
+"""百度街景/全景静态图插件。
+
+注意：百度地图 API 会检测请求来源 IP。走代理后会变成海外 IP，
+百度会拒绝服务。因此默认 proxies=None（直连），仅在特殊场景下才传代理。
+"""
 import os
 import requests
 
@@ -10,7 +14,8 @@ def _lnglat_str(lon, lat):
     return f"{float(lon)},{float(lat)}"
 
 
-def get_streetview_metadata(lon, lat, ak, log_callback=None, *, coordtype="wgs84ll"):
+def get_streetview_metadata(lon, lat, ak, log_callback=None, *,
+                            coordtype="wgs84ll", proxies=None):
     """探测指定坐标是否有百度街景覆盖。"""
     log = make_logger(log_callback)
 
@@ -27,7 +32,8 @@ def get_streetview_metadata(lon, lat, ak, log_callback=None, *, coordtype="wgs84
         params["coordtype"] = coordtype
 
     try:
-        r = requests.get(BAIDU_PANORAMA_URL, params=params, timeout=8)
+        r = requests.get(BAIDU_PANORAMA_URL, params=params,
+                         timeout=8, proxies=proxies)
         ct = r.headers.get("Content-Type", "")
         if r.status_code == 200 and "image" in ct:
             return True
@@ -40,7 +46,8 @@ def get_streetview_metadata(lon, lat, ak, log_callback=None, *, coordtype="wgs84
 
 
 def download_streetview_image(lon, lat, heading, pitch, ak, save_path,
-                              log_callback=None, *, coordtype="wgs84ll"):
+                              log_callback=None, *,
+                              coordtype="wgs84ll", proxies=None):
     """下载指定方向的百度街景图片。"""
     log = make_logger(log_callback)
 
@@ -57,7 +64,8 @@ def download_streetview_image(lon, lat, heading, pitch, ak, save_path,
         params["coordtype"] = coordtype
 
     try:
-        resp = requests.get(BAIDU_PANORAMA_URL, params=params, timeout=10)
+        resp = requests.get(BAIDU_PANORAMA_URL, params=params,
+                            timeout=10, proxies=proxies)
         ct = resp.headers.get("Content-Type", "")
         if resp.status_code == 200 and "image" in ct:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)

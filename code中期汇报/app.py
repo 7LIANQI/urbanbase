@@ -3,6 +3,13 @@
 """城市街道环境大数据采集与分析平台 —— 启动入口。"""
 import sys
 
+# ---- Matplotlib 全局配置（必须在 QApplication 创建前设置） ----
+import matplotlib
+matplotlib.use('qtagg')
+matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
+matplotlib.rcParams['axes.unicode_minus'] = False
+matplotlib.rcParams['figure.dpi'] = 80
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 

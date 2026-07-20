@@ -17,6 +17,15 @@ env/
 # Cache
 cache/
 
+# Logs
+logs/
+
+# Output directories
+output_*/
+
+# Generated reports
+report/
+
 # IDE
 .idea/
 .vscode/
