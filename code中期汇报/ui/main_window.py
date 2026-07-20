@@ -217,11 +217,15 @@ class MainWindow(QWidget):
         form.addLayout(row1)
 
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("GEE 密钥路径:"))
+        row2.addWidget(QLabel("GEE 密钥文件:"))
         self.gee_key_input = QLineEdit()
-        self.gee_key_input.setPlaceholderText("GEE JSON 路径 (可选)")
+        self.gee_key_input.setPlaceholderText("点击“导入...”选择 GEE JSON 文件")
         self.gee_key_input.setText(self.settings.value("keys/gee_key", ""))
+        self.gee_key_input.setReadOnly(True)
         row2.addWidget(self.gee_key_input)
+        import_gee_btn = QPushButton("导入...")
+        import_gee_btn.clicked.connect(self._browse_gee_key_file)
+        row2.addWidget(import_gee_btn)
         form.addLayout(row2)
 
         row3 = QHBoxLayout()
@@ -446,6 +450,15 @@ class MainWindow(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "选择输出目录")
         if folder:
             self.output_dir_input.setText(folder)
+
+    def _browse_gee_key_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择 GEE 密钥 JSON 文件", "", "JSON Files (*.json)"
+        )
+        if file_path:
+            self.gee_key_input.setText(file_path)
+            self.settings.setValue("keys/gee_key", file_path)
+            self.log_box.append(f"✅ 已导入 GEE 密钥文件: {file_path}")
 
     # ==================== 任务控制 ====================
 
