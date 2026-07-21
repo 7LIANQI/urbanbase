@@ -574,57 +574,151 @@ def get_ndwi_evi_stats(roi_geometry, start_date, end_date, output_dir,
 
 
 def get_population_stats(roi_geometry, output_dir, log_callback=None):
-    """获取 WorldPop 人口密度数据。
+    """获取人口密度数据（WorldPop 为主，GPW 为备）。
 
-    数据集: WorldPop/GP/100m/pop (100m 分辨率)
-    使用 2020 年数据（最常用年份），统计 ROI 内总人口和平均人口密度。
+    数据集优先级:
+        1. WorldPop/GP/100m/pop — 100m 分辨率，2020 年
+        2. CIECIN/GPWv411/GPW_Population_Count — ~1km 分辨率，2020 年（备用）
 
     输出: population_stats.csv
     """
     log = make_logger(log_callback)
-    log("  获取 WorldPop 人口密度数据...")
+    log("  获取人口密度数据...")
 
+    # 计算 ROI 面积
     try:
-        # WorldPop 2020 全球人口计数
-        pop = ee.ImageCollection("WorldPop/GP/100m/pop")
-        # 取 2020 年影像
-        pop_2020 = pop.filterDate('2020-01-01', '2020-12-31').first()
-
-        if pop_2020 is None:
-            log("  WorldPop 2020 数据不可用，跳过")
-            return
-
-        # 计算 ROI 面积 (km²) 用于推算人口密度
         area_sq_m = roi_geometry.area(1).getInfo()
-        area_sq_km = area_sq_m / 1e6 if area_sq_m else 1
+        area_sq_km = area_sq_m / 1e6 if area_sq_m else 1.0
+    except Exception:
+        area_sq_km = 1.0
+        log("    ⚠️ 无法计算 ROI 面积，使用估算值")
+
+    # ---- 方案1: WorldPop (100m) ----
+    result = _try_worldpop(roi_geometry, area_sq_km, log)
+
+    # ---- 方案2: GPW v4 (备选) ----
+    if result is None:
+        log("    WorldPop 无数据，尝试 GPW v4...")
+        result = _try_gpw(roi_geometry, area_sq_km, log)
+
+    if result is None:
+        log("    ⚠️ 所有人口数据源均无有效数据（该区域可能无覆盖）")
+        # 写入占位 CSV
+        empty_record = {
+            '总人口估算': 0,
+            '平均人口密度_人每平方千米': 0,
+            '最大人口密度_人每平方千米': 0,
+            'ROI面积_km2': round(area_sq_km, 3),
+            '数据来源': '无有效数据',
+        }
+        df = pd.DataFrame([empty_record])
+        df.to_csv(os.path.join(output_dir, "population_stats.csv"), index=False)
+        return
+
+    record = {
+        '总人口估算': round(result['total'], 1),
+        '平均人口密度_人每平方千米': round(result['density'], 1),
+        '最大人口密度_人每平方千米': round(result['max_density'], 1),
+        'ROI面积_km2': round(area_sq_km, 3),
+        '数据来源': result.get('source', 'unknown'),
+    }
+    df = pd.DataFrame([record])
+    df.to_csv(os.path.join(output_dir, "population_stats.csv"), index=False)
+    log(f"  人口数据已保存（来源: {record['数据来源']}, 估算总人口: {record['总人口估算']:.0f}, "
+        f"密度: {record['平均人口密度_人每平方千米']:.1f} 人/km²）")
+
+
+def _try_worldpop(roi_geometry, area_sq_km, log):
+    """尝试从 WorldPop 获取人口数据。"""
+    try:
+        # WorldPop 100m 人口计数集合 —— 按年份组织
+        pop_col = ee.ImageCollection("WorldPop/GP/100m/pop")
+        # 按时间降序排列，获取最新可用影像（通常是 2020 年）
+        pop_sorted = pop_col.filterBounds(roi_geometry).sort('system:time_start', False)
+        pop_img = pop_sorted.first()
+
+        # 验证影像是否有效（通过检查 band 名称）
+        band_names = pop_img.bandNames().getInfo()
+        if not band_names or 'population' not in band_names:
+            log(f"    WorldPop 影像无 population 波段 (bands: {band_names})")
+            return None
+
+        # 获取影像年份
+        try:
+            img_date = pop_img.date().format('YYYY').getInfo()
+            log(f"    WorldPop 影像年份: {img_date}")
+        except Exception:
+            img_date = 'unknown'
 
         pop_reducer = (
             ee.Reducer.sum()
             .combine(ee.Reducer.mean(), sharedInputs=True)
             .combine(ee.Reducer.max(), sharedInputs=True)
         )
-        stats = pop_2020.select('population').reduceRegion(
+        stats = pop_img.select('population').reduceRegion(
             reducer=pop_reducer,
             geometry=roi_geometry,
             scale=100,
             maxPixels=1e9,
         ).getInfo()
 
-        if stats:
-            total_pop = stats.get('population_sum', 0) or 0
-            mean_density = stats.get('population_mean', 0) or 0  # 人均/像素 (100m²)
-            max_density = stats.get('population_max', 0) or 0
+        if not stats:
+            return None
 
-            record = {
-                '总人口估算': round(total_pop, 1),
-                '平均人口密度_人每平方千米': round(mean_density * 100, 1),  # 100m像素 → 1km²
-                '最大人口密度_人每平方千米': round(max_density * 100, 1),
-                'ROI面积_km2': round(area_sq_km, 3),
-            }
-            df = pd.DataFrame([record])
-            df.to_csv(os.path.join(output_dir, "population_stats.csv"), index=False)
-            log(f"  人口数据已保存（估算总人口: {record['总人口估算']:.0f}）")
-        else:
-            log("  人口数据为空，跳过")
+        total_pop = stats.get('population_sum')
+        mean_pop = stats.get('population_mean')
+        max_pop = stats.get('population_max')
+
+        # 全为 None 或 0 → 无数据
+        if (total_pop is None or total_pop == 0) and (mean_pop is None or mean_pop == 0):
+            log(f"    WorldPop 数据全为 0/None (sum={total_pop}, mean={mean_pop})")
+            return None
+
+        return {
+            'total': total_pop or 0,
+            'density': (mean_pop or 0) * 100,  # 100m像素 → km²
+            'max_density': (max_pop or 0) * 100,
+            'source': f'WorldPop ({img_date})',
+        }
     except Exception as e:
-        log(f"  人口数据处理出错: {e}")
+        log(f"    WorldPop 处理出错: {e}")
+        return None
+
+
+def _try_gpw(roi_geometry, area_sq_km, log):
+    """尝试从 GPW v4 获取人口数据（低分辨率备选）。"""
+    try:
+        gpw = ee.Image("CIESIN/GPWv411/GPW_Population_Count/GPW_Population_Count_2020")
+
+        pop_reducer = (
+            ee.Reducer.sum()
+            .combine(ee.Reducer.mean(), sharedInputs=True)
+            .combine(ee.Reducer.max(), sharedInputs=True)
+        )
+        stats = gpw.select('population').reduceRegion(
+            reducer=pop_reducer,
+            geometry=roi_geometry,
+            scale=1000,  # GPW 约 1km 分辨率
+            maxPixels=1e9,
+        ).getInfo()
+
+        if not stats:
+            return None
+
+        total_pop = stats.get('population_sum')
+        mean_pop = stats.get('population_mean')
+        max_pop = stats.get('population_max')
+
+        if (total_pop is None or total_pop == 0) and (mean_pop is None or mean_pop == 0):
+            log(f"    GPW 数据全为 0/None")
+            return None
+
+        return {
+            'total': total_pop or 0,
+            'density': (mean_pop or 0) * 1,  # GPW 像元单位已是 人/像元(~1km²)
+            'max_density': max_pop or 0,
+            'source': 'GPW v4 (2020)',
+        }
+    except Exception as e:
+        log(f"    GPW 处理出错: {e}")
+        return None

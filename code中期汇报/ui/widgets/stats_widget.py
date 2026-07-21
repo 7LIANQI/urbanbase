@@ -34,7 +34,7 @@ class StatsWidget(QWidget):
         layout.addWidget(elev_group)
 
         # ---- 人口密度 ----
-        pop_group = QGroupBox("👥 人口密度 (WorldPop 2020)")
+        pop_group = QGroupBox("👥 人口密度 (WorldPop / GPW)")
         pop_layout = QVBoxLayout()
         self.pop_label = QLabel("暂无数据")
         self.pop_label.setStyleSheet("font-size: 14px; padding: 8px;")

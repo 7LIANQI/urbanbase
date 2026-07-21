@@ -270,20 +270,26 @@ class WeatherWidget(QWidget):
                 self._show_chart_error("气候数据为空")
                 return
 
-            df = df.tail(15)
+            df = df.tail(15).reset_index(drop=True)
+            x = range(len(df))
 
             self.figure.clear()
             ax = self.figure.add_subplot(111)
-            ax.plot(df['Date'], df['日均气温_C'], marker='o',
-                    color='#e74c3c', linewidth=2, label='日均气温')
-            ax.fill_between(range(len(df)), df['日最低气温_C'], df['日最高气温_C'],
+
+            # 气温范围填充 + 日均线
+            ax.fill_between(x, df['日最低气温_C'], df['日最高气温_C'],
                             alpha=0.2, color='#e74c3c', label='气温范围')
+            ax.plot(x, df['日均气温_C'], marker='o', color='#e74c3c',
+                    linewidth=2, markersize=5, label='日均气温')
             ax.set_ylabel('气温 (C)', fontsize=10)
-            ax.tick_params(axis='x', rotation=45, labelsize=8)
+            ax.set_xticks(x)
+            ax.set_xticklabels(df['Date'], rotation=45, ha='right', fontsize=8)
             ax.grid(True, linestyle='--', alpha=0.5)
 
+            # 日照柱状图
             ax2 = ax.twinx()
-            ax2.bar(range(len(df)), df['日照时数_h'], alpha=0.4,
+            bar_width = 0.5
+            ax2.bar(x, df['日照时数_h'], bar_width, alpha=0.4,
                     color='#3498db', label='日照时数')
             ax2.set_ylabel('日照时数 (h)', fontsize=10, color='#3498db')
             ax2.tick_params(axis='y', labelcolor='#3498db')

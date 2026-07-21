@@ -131,18 +131,38 @@ class ChartWidget(QWidget):
                     ha='center', va='center', transform=ax.transAxes, fontsize=10)
             self.canvas.draw()
 
+    @staticmethod
+    def _auto_xticks(ax, n_points, max_ticks=12):
+        """自动限制 x 轴刻度数量，避免标签重叠。"""
+        if n_points > max_ticks:
+            step = max(1, n_points // max_ticks)
+            for i, label in enumerate(ax.xaxis.get_ticklabels()):
+                if i % step != 0:
+                    label.set_visible(False)
+
     def _plot(self, ax, filename, x_col, y_col, title, ylabel, color):
         csv_path = Path(self.current_dir) / filename
         if not csv_path.exists():
             raise FileNotFoundError(f"文件不存在: {filename}")
 
         df = pd.read_csv(csv_path)
-        ax.plot(df[x_col], df[y_col], marker='o', color=color, linewidth=2)
+        n = len(df)
+        # 数据量大时：缩小标记、细线、减少刻度
+        if n > 60:
+            ax.plot(df[x_col], df[y_col], color=color, linewidth=1, marker='',
+                    markersize=3)
+        elif n > 30:
+            ax.plot(df[x_col], df[y_col], marker='.', color=color, linewidth=1.5,
+                    markersize=4)
+        else:
+            ax.plot(df[x_col], df[y_col], marker='o', color=color, linewidth=2,
+                    markersize=5)
         ax.set_title(title, fontsize=12)
         ax.set_ylabel(ylabel, fontsize=10)
         ax.tick_params(axis='x', rotation=45, labelsize=8)
         ax.tick_params(axis='y', labelsize=8)
         ax.grid(True, linestyle='--', alpha=0.7)
+        self._auto_xticks(ax, n)
 
     def _plot_era5_temp(self, ax):
         """ERA5 气温：日均/最高/最低 三条线。"""
@@ -151,12 +171,22 @@ class ChartWidget(QWidget):
             raise FileNotFoundError("era5_climate_stats.csv 不存在")
 
         df = pd.read_csv(csv_path)
-        ax.plot(df['Date'], df['日均气温_C'], marker='o',
-                color='#2c3e50', linewidth=2, label='日均气温')
-        ax.plot(df['Date'], df['日最高气温_C'], marker='^',
-                color='red', linewidth=1, linestyle='--', label='最高气温')
-        ax.plot(df['Date'], df['日最低气温_C'], marker='v',
-                color='blue', linewidth=1, linestyle='--', label='最低气温')
+        n = len(df)
+        if n > 60:
+            kw = {'marker': '', 'markersize': 0}
+        elif n > 30:
+            kw = {'marker': '.', 'markersize': 3}
+        else:
+            kw = {'marker': 'o', 'markersize': 5}
+
+        ax.plot(df['Date'], df['日均气温_C'], color='#2c3e50',
+                linewidth=2 if n <= 60 else 1, label='日均气温', **kw)
+        ax.plot(df['Date'], df['日最高气温_C'], marker='^' if n <= 30 else '',
+                color='red', linewidth=1, linestyle='--', label='最高气温',
+                markersize=3)
+        ax.plot(df['Date'], df['日最低气温_C'], marker='v' if n <= 30 else '',
+                color='blue', linewidth=1, linestyle='--', label='最低气温',
+                markersize=3)
         ax.fill_between(df['Date'], df['日最低气温_C'], df['日最高气温_C'],
                         alpha=0.15, color='gray')
         ax.set_title("ERA5 气温 时间序列", fontsize=12)
@@ -165,20 +195,35 @@ class ChartWidget(QWidget):
         ax.tick_params(axis='y', labelsize=8)
         ax.legend(fontsize=8)
         ax.grid(True, linestyle='--', alpha=0.7)
+        self._auto_xticks(ax, n)
 
     def _plot_bar(self, ax, filename, x_col, y_col, title, ylabel, color):
-        """柱状图（日照时数等）。"""
+        """柱状图（日照时数等）—— 数据量大时自动拉宽柱宽并减少刻度。"""
         csv_path = Path(self.current_dir) / filename
         if not csv_path.exists():
             raise FileNotFoundError(f"文件不存在: {filename}")
 
         df = pd.read_csv(csv_path)
-        ax.bar(df[x_col], df[y_col], color=color, alpha=0.7, edgecolor='white')
+        n = len(df)
+        # 动态柱宽：数据少时留间隙，数据多时柱子变细
+        if n > 120:
+            bar_width = 1.0
+            edge_width = 0
+        elif n > 60:
+            bar_width = 0.9
+            edge_width = 0.1
+        else:
+            bar_width = 0.7
+            edge_width = 0.3
+
+        ax.bar(df[x_col], df[y_col], color=color, alpha=0.7,
+               edgecolor='white', width=bar_width, linewidth=edge_width)
         ax.set_title(title, fontsize=12)
         ax.set_ylabel(ylabel, fontsize=10)
         ax.tick_params(axis='x', rotation=45, labelsize=8)
         ax.tick_params(axis='y', labelsize=8)
         ax.grid(True, linestyle='--', alpha=0.7, axis='y')
+        self._auto_xticks(ax, n)
 
     def _plot_hourly(self, ax, y_col, title, ylabel, color):
         """逐时数据折线图（ERA5-Land 单日 24 小时）。"""

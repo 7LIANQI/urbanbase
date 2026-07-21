@@ -125,6 +125,7 @@ class MainWindow(QWidget):
         self.output_dirs = []
         self.current_index = 0
         self.worker = None
+        self._stopped_by_user = False
         self.settings = QSettings("MyCompany", "UrbanAnalysisApp")
         self.file_logger = FileLogger("logs")
 
@@ -519,6 +520,7 @@ class MainWindow(QWidget):
             self.log_box.append("请添加采集点")
             return
 
+        self._stopped_by_user = False
         self.output_dirs.clear()
         self.current_index = 0
         self.progress.setValue(0)
@@ -557,10 +559,11 @@ class MainWindow(QWidget):
 
     def _stop_tasks(self):
         if self.worker and self.worker.isRunning():
-            self.log_box.append("🛑 正在停止...")
+            self._stopped_by_user = True
+            self.log_box.append("🛑 正在停止（等待当前任务安全退出）...")
             self.worker.stop()
-            self.worker.wait()
-            self.log_box.append("✅ 已停止")
+            # 不调用 wait() —— 在主线程阻塞会导致 GUI 卡死
+            # worker.finished 信号触发后 _on_all_finished 会处理后续
 
     def _export_current_data(self):
         if not self.output_dirs:
@@ -696,8 +699,13 @@ class MainWindow(QWidget):
             self.result_dialog.raise_()
 
     def _on_all_finished(self):
-        self.log_box.append("🎉 所有任务完成！")
-        self.log_dialog.set_status("✅ 采集完成")
+        if self._stopped_by_user:
+            self.log_box.append("✅ 任务已停止")
+            self.log_dialog.set_status("⏹️ 已停止")
+            self._stopped_by_user = False
+        else:
+            self.log_box.append("🎉 所有任务完成！")
+            self.log_dialog.set_status("✅ 采集完成")
 
     def _update_result_display(self):
         if not self.output_dirs:
