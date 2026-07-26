@@ -13,17 +13,14 @@ class Worker(QThread):
     result_ready = pyqtSignal(str)
 
     def __init__(self, tasks, map_key, rs_key, gee_key_path,
-                 enable_air, enable_street, enable_gee, enable_osm,
-                 file_logger=None, output_base_dir=None, proxy_config=None):
+                 options, file_logger=None, output_base_dir=None,
+                 proxy_config=None):
         super().__init__()
         self.tasks = tasks
         self.map_key = map_key
         self.rs_key = rs_key
         self.gee_key_path = gee_key_path
-        self.enable_air = enable_air
-        self.enable_street = enable_street
-        self.enable_gee = enable_gee
-        self.enable_osm = enable_osm
+        self.options = options       # 细粒度选项 dict
         self._file_logger = file_logger
         self._output_base_dir = output_base_dir
         self._proxy_config = proxy_config
@@ -51,13 +48,10 @@ class Worker(QThread):
                     baidu_key=self.map_key,
                     openweather_key=self.rs_key,
                     gee_key_path=self.gee_key_path,
-                    enable_air_quality=self.enable_air,
-                    enable_streetview=self.enable_street,
-                    enable_gee=self.enable_gee,
-                    enable_osm=self.enable_osm,
                     log_callback=self._emit_log,
                     output_base_dir=self._output_base_dir,
                     proxy_config=self._proxy_config,
+                    options=self.options,
                 )
                 output_dirs.append(out_dir)
                 self.result_ready.emit(out_dir)

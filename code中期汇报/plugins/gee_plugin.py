@@ -60,7 +60,8 @@ def initialize_gee(key_path=None, log_callback=None, proxy_url=None):
         return False
 
 
-def get_gee_stats(roi_geometry, start_date, end_date, output_dir, log_callback=None):
+def get_gee_stats(roi_geometry, start_date, end_date, output_dir, log_callback=None,
+                  enable_viirs=True, enable_ndvi=True, enable_lst=True):
     """获取 VIIRS 夜光 / Sentinel-2 NDVI / Landsat 8 地表温度统计。"""
     log = make_logger(log_callback)
 
@@ -72,149 +73,158 @@ def get_gee_stats(roi_geometry, start_date, end_date, output_dir, log_callback=N
     )
 
     # ---- VIIRS 夜光 ----
-    log("  获取 VIIRS 夜光数据...")
-    viirs_col = (
-        ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG")
-        .filterDate(start_date, end_date)
-        .select('avg_rad')
-    )
-
-    def calc_viirs(img):
-        stats = img.reduceRegion(
-            reducer=reducer_base, geometry=roi_geometry, scale=500, maxPixels=1e9,
+    if enable_viirs:
+        log("  获取 VIIRS 夜光数据...")
+        viirs_col = (
+            ee.ImageCollection("NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG")
+            .filterDate(start_date, end_date)
+            .select('avg_rad')
         )
-        return ee.Feature(None, stats).set({'Date': img.date().format('YYYY-MM-dd')})
 
-    try:
-        viirs_feats = viirs_col.map(calc_viirs).getInfo()
-        viirs_data = [f['properties'] for f in viirs_feats['features']]
-        if viirs_data:
-            viirs_df = pd.DataFrame(viirs_data)
-            col_mapping = {
-                'avg_rad_mean': '夜光均值',
-                'avg_rad_stdDev': '夜光标准差',
-                'avg_rad_min': '夜光最小值',
-                'avg_rad_max': '夜光最大值',
-                'avg_rad_median': '夜光中位数',
-            }
-            exist_cols = [c for c in ['Date'] + list(col_mapping) if c in viirs_df.columns]
-            if exist_cols:
-                viirs_df = viirs_df[exist_cols].rename(
-                    columns={k: v for k, v in col_mapping.items() if k in viirs_df.columns}
-                )
-                viirs_df.to_csv(os.path.join(output_dir, "viirs_stats.csv"), index=False)
-                log("  VIIRS 数据已保存")
+        def calc_viirs(img):
+            stats = img.reduceRegion(
+                reducer=reducer_base, geometry=roi_geometry, scale=500, maxPixels=1e9,
+            )
+            return ee.Feature(None, stats).set({'Date': img.date().format('YYYY-MM-dd')})
+
+        try:
+            viirs_feats = viirs_col.map(calc_viirs).getInfo()
+            viirs_data = [f['properties'] for f in viirs_feats['features']]
+            if viirs_data:
+                viirs_df = pd.DataFrame(viirs_data)
+                col_mapping = {
+                    'avg_rad_mean': '夜光均值',
+                    'avg_rad_stdDev': '夜光标准差',
+                    'avg_rad_min': '夜光最小值',
+                    'avg_rad_max': '夜光最大值',
+                    'avg_rad_median': '夜光中位数',
+                }
+                exist_cols = [c for c in ['Date'] + list(col_mapping) if c in viirs_df.columns]
+                if exist_cols:
+                    viirs_df = viirs_df[exist_cols].rename(
+                        columns={k: v for k, v in col_mapping.items() if k in viirs_df.columns}
+                    )
+                    viirs_df.to_csv(os.path.join(output_dir, "viirs_stats.csv"), index=False)
+                    log("  VIIRS 数据已保存")
+                else:
+                    log("  VIIRS 无有效列，跳过")
             else:
-                log("  VIIRS 无有效列，跳过")
-        else:
-            log("  VIIRS 无数据，跳过")
-    except Exception as e:
-        log(f"  VIIRS 处理出错: {e}")
+                log("  VIIRS 无数据，跳过")
+        except Exception as e:
+            log(f"  VIIRS 处理出错: {e}")
+    else:
+        log("  ⏭️ VIIRS 夜光已禁用")
 
     # ---- NDVI ----
-    log("  获取 Sentinel-2 NDVI 数据...")
-    s2 = (
-        ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-        .filterBounds(roi_geometry)
-        .filterDate(start_date, end_date)
-        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
-    )
-
-    def add_ndvi(img):
-        ndvi = img.normalizedDifference(['B8', 'B4']).rename('NDVI')
-        return img.addBands(ndvi)
-
-    s2_ndvi = s2.map(add_ndvi).select('NDVI')
-
-    def calc_ndvi(img):
-        mean = img.reduceRegion(
-            reducer=ee.Reducer.mean(), geometry=roi_geometry, scale=10, maxPixels=1e9,
+    if enable_ndvi:
+        log("  获取 Sentinel-2 NDVI 数据...")
+        s2 = (
+            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+            .filterBounds(roi_geometry)
+            .filterDate(start_date, end_date)
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
         )
-        return ee.Feature(None, mean).set({'Date': img.date().format('YYYY-MM-dd')})
 
-    try:
-        ndvi_feats = s2_ndvi.map(calc_ndvi).getInfo()
-        ndvi_data = [
-            f['properties'] for f in ndvi_feats['features']
-            if f['properties'].get('NDVI') is not None
-        ]
-        if ndvi_data:
-            ndvi_df = pd.DataFrame(ndvi_data)
-            if 'Date' in ndvi_df.columns and 'NDVI' in ndvi_df.columns:
-                ndvi_df = ndvi_df[['Date', 'NDVI']]
-                ndvi_df.columns = ['Date', '区域NDVI均值']
-                ndvi_df.to_csv(os.path.join(output_dir, "ndvi_stats.csv"), index=False)
-                log("  NDVI 数据已保存")
+        def add_ndvi(img):
+            ndvi = img.normalizedDifference(['B8', 'B4']).rename('NDVI')
+            return img.addBands(ndvi)
+
+        s2_ndvi = s2.map(add_ndvi).select('NDVI')
+
+        def calc_ndvi(img):
+            mean = img.reduceRegion(
+                reducer=ee.Reducer.mean(), geometry=roi_geometry, scale=10, maxPixels=1e9,
+            )
+            return ee.Feature(None, mean).set({'Date': img.date().format('YYYY-MM-dd')})
+
+        try:
+            ndvi_feats = s2_ndvi.map(calc_ndvi).getInfo()
+            ndvi_data = [
+                f['properties'] for f in ndvi_feats['features']
+                if f['properties'].get('NDVI') is not None
+            ]
+            if ndvi_data:
+                ndvi_df = pd.DataFrame(ndvi_data)
+                if 'Date' in ndvi_df.columns and 'NDVI' in ndvi_df.columns:
+                    ndvi_df = ndvi_df[['Date', 'NDVI']]
+                    ndvi_df.columns = ['Date', '区域NDVI均值']
+                    ndvi_df.to_csv(os.path.join(output_dir, "ndvi_stats.csv"), index=False)
+                    log("  NDVI 数据已保存")
+                else:
+                    log("  NDVI 缺少必要列，跳过")
             else:
-                log("  NDVI 缺少必要列，跳过")
-        else:
-            log("  NDVI 无数据，跳过")
-    except Exception as e:
-        log(f"  NDVI 处理出错: {e}")
+                log("  NDVI 无数据，跳过")
+        except Exception as e:
+            log(f"  NDVI 处理出错: {e}")
+    else:
+        log("  ⏭️ NDVI 已禁用")
 
     # ---- 地表温度 ----
-    log("  获取 Landsat 8 地表温度数据...")
-    l8 = (
-        ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
-        .filterBounds(roi_geometry)
-        .filterDate(start_date, end_date)
-        .filter(ee.Filter.lt('CLOUD_COVER', 20))
-    )
-
-    def proc_lst(img):
-        lst = (
-            img.select('ST_B10')
-            .multiply(LST_SCALE)
-            .add(LST_OFFSET)
-            .subtract(LST_KELVIN)
-            .rename('LST_Celsius')
+    if enable_lst:
+        log("  获取 Landsat 8 地表温度数据...")
+        l8 = (
+            ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+            .filterBounds(roi_geometry)
+            .filterDate(start_date, end_date)
+            .filter(ee.Filter.lt('CLOUD_COVER', 20))
         )
-        return img.addBands(lst)
 
-    l8_lst = l8.map(proc_lst).select('LST_Celsius')
+        def proc_lst(img):
+            lst = (
+                img.select('ST_B10')
+                .multiply(LST_SCALE)
+                .add(LST_OFFSET)
+                .subtract(LST_KELVIN)
+                .rename('LST_Celsius')
+            )
+            return img.addBands(lst)
 
-    lst_reducer = (
-        ee.Reducer.mean()
-        .combine(ee.Reducer.minMax(), sharedInputs=True)
-        .combine(ee.Reducer.median(), sharedInputs=True)
-    )
+        l8_lst = l8.map(proc_lst).select('LST_Celsius')
 
-    def calc_lst(img):
-        stats = img.reduceRegion(
-            reducer=lst_reducer, geometry=roi_geometry, scale=30, maxPixels=1e9,
+        lst_reducer = (
+            ee.Reducer.mean()
+            .combine(ee.Reducer.minMax(), sharedInputs=True)
+            .combine(ee.Reducer.median(), sharedInputs=True)
         )
-        return ee.Feature(None, stats).set({'Date': img.date().format('YYYY-MM-dd')})
 
-    try:
-        lst_feats = l8_lst.map(calc_lst).getInfo()
-        lst_data = [
-            f['properties'] for f in lst_feats['features']
-            if f['properties'].get('LST_Celsius_mean') is not None
-        ]
-        if lst_data:
-            lst_df = pd.DataFrame(lst_data)
-            expected = [
-                'Date', 'LST_Celsius_mean', 'LST_Celsius_min',
-                'LST_Celsius_max', 'LST_Celsius_median',
+        def calc_lst(img):
+            stats = img.reduceRegion(
+                reducer=lst_reducer, geometry=roi_geometry, scale=30, maxPixels=1e9,
+            )
+            return ee.Feature(None, stats).set({'Date': img.date().format('YYYY-MM-dd')})
+
+        try:
+            lst_feats = l8_lst.map(calc_lst).getInfo()
+            lst_data = [
+                f['properties'] for f in lst_feats['features']
+                if f['properties'].get('LST_Celsius_mean') is not None
             ]
-            exist = [c for c in expected if c in lst_df.columns]
-            if exist:
-                lst_df = lst_df[exist]
-                rename = {
-                    'LST_Celsius_mean': '地表温度均值(C)',
-                    'LST_Celsius_min': '最低温',
-                    'LST_Celsius_max': '最高温',
-                    'LST_Celsius_median': '温度中位数',
-                }
-                lst_df = lst_df.rename(columns={k: v for k, v in rename.items() if k in lst_df.columns})
-                lst_df.to_csv(os.path.join(output_dir, "lst_stats.csv"), index=False)
-                log("  地表温度数据已保存")
+            if lst_data:
+                lst_df = pd.DataFrame(lst_data)
+                expected = [
+                    'Date', 'LST_Celsius_mean', 'LST_Celsius_min',
+                    'LST_Celsius_max', 'LST_Celsius_median',
+                ]
+                exist = [c for c in expected if c in lst_df.columns]
+                if exist:
+                    lst_df = lst_df[exist]
+                    rename = {
+                        'LST_Celsius_mean': '地表温度均值(C)',
+                        'LST_Celsius_min': '最低温',
+                        'LST_Celsius_max': '最高温',
+                        'LST_Celsius_median': '温度中位数',
+                    }
+                    lst_df = lst_df.rename(columns={k: v for k, v in rename.items() if k in lst_df.columns})
+                    lst_df.to_csv(os.path.join(output_dir, "lst_stats.csv"), index=False)
+                    log("  地表温度数据已保存")
+                else:
+                    log("  地表温度缺少必要列，跳过")
             else:
-                log("  地表温度缺少必要列，跳过")
-        else:
-            log("  地表温度无数据，跳过")
-    except Exception as e:
-        log(f"  地表温度处理出错: {e}")
+                log("  地表温度无数据，跳过")
+        except Exception as e:
+            log(f"  地表温度处理出错: {e}")
+    else:
+        log("  ⏭️ 地表温度已禁用")
 
 
 def get_era5_climate_stats(roi_geometry, start_date, end_date, output_dir,
@@ -488,7 +498,7 @@ def get_precipitation_stats(roi_geometry, start_date, end_date, output_dir,
 
 
 def get_ndwi_evi_stats(roi_geometry, start_date, end_date, output_dir,
-                       log_callback=None):
+                       log_callback=None, enable_ndwi=True, enable_evi=True):
     """从 Sentinel-2 计算 NDWI 和 EVI 时间序列。
 
     NDWI (McFeeters): (Green - NIR) / (Green + NIR) = (B3 - B8) / (B3 + B8)
@@ -497,6 +507,9 @@ def get_ndwi_evi_stats(roi_geometry, start_date, end_date, output_dir,
     输出: ndwi_stats.csv, evi_stats.csv
     """
     log = make_logger(log_callback)
+
+    if not enable_ndwi and not enable_evi:
+        return
 
     s2 = (
         ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
@@ -533,44 +546,50 @@ def get_ndwi_evi_stats(roi_geometry, start_date, end_date, output_dir,
         })
 
     # ---- NDWI ----
-    try:
-        log("  计算 Sentinel-2 NDWI...")
-        ndwi_feats = s2_indices.select('NDWI').map(calc_indices).getInfo()
-        ndwi_records = [
-            f['properties'] for f in ndwi_feats.get('features', [])
-            if f.get('properties', {}).get('NDWI') is not None
-        ]
-        if ndwi_records:
-            ndwi_df = pd.DataFrame(ndwi_records)
-            ndwi_df = ndwi_df[['Date', 'NDWI']]
-            ndwi_df.columns = ['Date', '区域NDWI均值']
-            ndwi_df['区域NDWI均值'] = ndwi_df['区域NDWI均值'].round(4)
-            ndwi_df.to_csv(os.path.join(output_dir, "ndwi_stats.csv"), index=False)
-            log(f"  NDWI 数据已保存（{len(ndwi_df)} 景）")
-        else:
-            log("  NDWI 无有效数据，跳过")
-    except Exception as e:
-        log(f"  NDWI 处理出错: {e}")
+    if enable_ndwi:
+        try:
+            log("  计算 Sentinel-2 NDWI...")
+            ndwi_feats = s2_indices.select('NDWI').map(calc_indices).getInfo()
+            ndwi_records = [
+                f['properties'] for f in ndwi_feats.get('features', [])
+                if f.get('properties', {}).get('NDWI') is not None
+            ]
+            if ndwi_records:
+                ndwi_df = pd.DataFrame(ndwi_records)
+                ndwi_df = ndwi_df[['Date', 'NDWI']]
+                ndwi_df.columns = ['Date', '区域NDWI均值']
+                ndwi_df['区域NDWI均值'] = ndwi_df['区域NDWI均值'].round(4)
+                ndwi_df.to_csv(os.path.join(output_dir, "ndwi_stats.csv"), index=False)
+                log(f"  NDWI 数据已保存（{len(ndwi_df)} 景）")
+            else:
+                log("  NDWI 无有效数据，跳过")
+        except Exception as e:
+            log(f"  NDWI 处理出错: {e}")
+    else:
+        log("  ⏭️ NDWI 已禁用")
 
     # ---- EVI ----
-    try:
-        log("  计算 Sentinel-2 EVI...")
-        evi_feats = s2_indices.select('EVI').map(calc_indices).getInfo()
-        evi_records = [
-            f['properties'] for f in evi_feats.get('features', [])
-            if f.get('properties', {}).get('EVI') is not None
-        ]
-        if evi_records:
-            evi_df = pd.DataFrame(evi_records)
-            evi_df = evi_df[['Date', 'EVI']]
-            evi_df.columns = ['Date', '区域EVI均值']
-            evi_df['区域EVI均值'] = evi_df['区域EVI均值'].round(4)
-            evi_df.to_csv(os.path.join(output_dir, "evi_stats.csv"), index=False)
-            log(f"  EVI 数据已保存（{len(evi_df)} 景）")
-        else:
-            log("  EVI 无有效数据，跳过")
-    except Exception as e:
-        log(f"  EVI 处理出错: {e}")
+    if enable_evi:
+        try:
+            log("  计算 Sentinel-2 EVI...")
+            evi_feats = s2_indices.select('EVI').map(calc_indices).getInfo()
+            evi_records = [
+                f['properties'] for f in evi_feats.get('features', [])
+                if f.get('properties', {}).get('EVI') is not None
+            ]
+            if evi_records:
+                evi_df = pd.DataFrame(evi_records)
+                evi_df = evi_df[['Date', 'EVI']]
+                evi_df.columns = ['Date', '区域EVI均值']
+                evi_df['区域EVI均值'] = evi_df['区域EVI均值'].round(4)
+                evi_df.to_csv(os.path.join(output_dir, "evi_stats.csv"), index=False)
+                log(f"  EVI 数据已保存（{len(evi_df)} 景）")
+            else:
+                log("  EVI 无有效数据，跳过")
+        except Exception as e:
+            log(f"  EVI 处理出错: {e}")
+    else:
+        log("  ⏭️ EVI 已禁用")
 
 
 def get_population_stats(roi_geometry, output_dir, log_callback=None):

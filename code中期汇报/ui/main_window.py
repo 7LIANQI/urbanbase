@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QHeaderView, QPushButton, QProgressBar,
     QTabWidget, QTextEdit, QListWidget, QListWidgetItem,
     QFileDialog, QMessageBox, QGridLayout,
+    QScrollArea, QFrame,
 )
 from PyQt6.QtCore import Qt, QSettings, QUrl
 from PyQt6.QtGui import QDesktopServices
@@ -232,7 +233,7 @@ class MainWindow(QWidget):
         row3 = QHBoxLayout()
         row3.addWidget(QLabel("百度地图 AK:"))
         self.baidu_key_input = QLineEdit()
-        self.baidu_key_input.setPlaceholderText("百度地图 AK (用于街景)")
+        self.baidu_key_input.setPlaceholderText("百度地图 AK (浏览器端, 用于街景)")
         self.baidu_key_input.setText(self.settings.value("keys/baidu_key", ""))
         row3.addWidget(self.baidu_key_input)
         form.addLayout(row3)
@@ -253,21 +254,95 @@ class MainWindow(QWidget):
         return group
 
     def _build_options_group(self):
+        """构建细粒度数据采集选项面板，每个子功能有独立复选框。"""
         group = QGroupBox("📦 数据采集选项")
-        layout = QHBoxLayout()
+        outer_layout = QVBoxLayout()
 
-        self.check_air = QCheckBox("空气质量")
-        self.check_street = QCheckBox("街景图像")
-        self.check_gee = QCheckBox("GEE 遥感")
-        self.check_osm = QCheckBox("路网数据")
-        self.check_chart = QCheckBox("自动图表")
+        # ---- 顶部万能按钮 ----
+        btn_row = QHBoxLayout()
+        select_all_btn = QPushButton("全选")
+        deselect_all_btn = QPushButton("取消全选")
+        btn_row.addWidget(select_all_btn)
+        btn_row.addWidget(deselect_all_btn)
+        btn_row.addStretch()
+        outer_layout.addLayout(btn_row)
 
-        for cb in [self.check_air, self.check_street, self.check_gee,
-                    self.check_osm, self.check_chart]:
-            cb.setChecked(True)
-            layout.addWidget(cb)
+        # ---- 可滚动区域 ----
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setMaximumHeight(320)
 
-        group.setLayout(layout)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(6)
+
+        # 收集所有子复选框用于全选/取消
+        all_checkboxes = []
+
+        def make_group(title, items):
+            """items: [(key, label), ...]"""
+            g = QGroupBox(title)
+            grid = QGridLayout()
+            grid.setSpacing(4)
+            cbs = {}
+            for idx, (key, label) in enumerate(items):
+                cb = QCheckBox(label)
+                cb.setChecked(True)
+                cbs[key] = cb
+                all_checkboxes.append(cb)
+                grid.addWidget(cb, idx // 3, idx % 3)
+            g.setLayout(grid)
+            return g, cbs
+
+        # 🌬️ 空气质量与天气
+        g_air, self.opt_air = make_group("🌬️ 空气质量与天气", [
+            ("air_quality", "空气质量 (AQI/污染物)"),
+            ("weather", "实时天气 (气温/湿度)"),
+        ])
+        scroll_layout.addWidget(g_air)
+
+        # 📸 街景
+        g_sv, self.opt_street = make_group("📸 街景图像", [
+            ("streetview", "百度街景 (360° 四方向)"),
+        ])
+        scroll_layout.addWidget(g_sv)
+
+        # 🛰️ GEE 遥感
+        g_gee, self.opt_gee = make_group("🛰️ GEE 遥感数据", [
+            ("gee_viirs", "VIIRS 夜间灯光"),
+            ("gee_ndvi", "NDVI 植被指数"),
+            ("gee_lst", "LST 地表温度"),
+            ("gee_elevation", "海拔数据"),
+            ("gee_precipitation", "降水量"),
+            ("gee_ndwi", "NDWI 水体指数"),
+            ("gee_evi", "EVI 增强植被"),
+            ("gee_population", "人口密度"),
+            ("gee_era5_climate", "ERA5 气候逐日"),
+            ("gee_era5_hourly", "ERA5 逐时"),
+        ])
+        scroll_layout.addWidget(g_gee)
+
+        # 🗺️ OSM 矢量
+        g_osm, self.opt_osm = make_group("🗺️ OSM 矢量数据", [
+            ("osm_roads", "道路网络"),
+            ("osm_buildings", "建筑物"),
+            ("osm_green_spaces", "绿地"),
+            ("osm_water_bodies", "水体"),
+            ("osm_stats", "OSM 统计指标"),
+        ])
+        scroll_layout.addWidget(g_osm)
+
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        outer_layout.addWidget(scroll)
+
+        # ---- 全选/取消逻辑 ----
+        select_all_btn.clicked.connect(lambda: [cb.setChecked(True) for cb in all_checkboxes])
+        deselect_all_btn.clicked.connect(lambda: [cb.setChecked(False) for cb in all_checkboxes])
+
+        group.setLayout(outer_layout)
         return group
 
     def _build_proxy_group(self):
@@ -471,19 +546,26 @@ class MainWindow(QWidget):
         self.settings.setValue("paths/output_dir", self.output_dir_input.text())
         self.settings.setValue("proxy/url", self.proxy_url_input.text())
 
-        enable_air = self.check_air.isChecked()
-        enable_street = self.check_street.isChecked()
-        enable_gee = self.check_gee.isChecked()
-        enable_osm = self.check_osm.isChecked()
-        enable_chart = self.check_chart.isChecked()
+        # 构建细粒度选项 dict
+        options = {}
+        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm]:
+            for key, cb in opt_dict.items():
+                options[key] = cb.isChecked()
 
         # 更新子组件状态
-        self.street_view.set_enabled(enable_street)
-        self.chart_view.set_enabled(enable_chart and enable_gee)
-        self.map_view.set_enabled(enable_osm)
-        self.air_quality_view.set_enabled(enable_air)
-        self.weather_view.set_enabled(enable_air)
-        self.stats_view.set_enabled(enable_gee or enable_osm)
+        self.street_view.set_enabled(options.get("streetview", True))
+        self.air_quality_view.set_enabled(options.get("air_quality", True))
+        self.weather_view.set_enabled(options.get("weather", True))
+
+        any_gee = any(
+            cb.isChecked() for cb in self.opt_gee.values()
+        )
+        any_osm = any(
+            cb.isChecked() for cb in self.opt_osm.values()
+        )
+        self.chart_view.set_enabled(any_gee)
+        self.map_view.set_enabled(any_osm)
+        self.stats_view.set_enabled(any_gee or any_osm)
 
         # 输出目录
         output_base = self.output_dir_input.text().strip() or None
@@ -546,7 +628,7 @@ class MainWindow(QWidget):
             self.baidu_key_input.text(),
             self.weather_key_input.text(),
             self.gee_key_input.text(),
-            enable_air, enable_street, enable_gee, enable_osm,
+            options,
             file_logger=self.file_logger.log,
             output_base_dir=output_base,
             proxy_config=proxy_config,
