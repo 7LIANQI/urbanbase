@@ -11,6 +11,7 @@ class Worker(QThread):
     progress = pyqtSignal(int)
     finished = pyqtSignal(list)
     result_ready = pyqtSignal(str)
+    step_progress = pyqtSignal(str, int, int)  # (step_name, current, total)
 
     def __init__(self, tasks, map_key, rs_key, gee_key_path,
                  options, file_logger=None, output_base_dir=None,
@@ -42,6 +43,17 @@ class Worker(QThread):
                 break
 
             self.log.emit(f"▶ 开始处理：经度 {lon}, 纬度 {lat}")
+            self.step_progress.emit(f"点位 {i}/{total}", i - 1, total)
+
+            # 使用带步骤回调的日志器
+            collector_count = [0]
+            collector_total = [0]
+
+            def step_callback(name, current, _total):
+                collector_total[0] = _total
+                collector_count[0] = current
+                self.step_progress.emit(name, current, _total)
+
             try:
                 out_dir = process_location(
                     lon, lat, r, sd, ed,
@@ -52,6 +64,7 @@ class Worker(QThread):
                     output_base_dir=self._output_base_dir,
                     proxy_config=self._proxy_config,
                     options=self.options,
+                    step_callback=step_callback,
                 )
                 output_dirs.append(out_dir)
                 self.result_ready.emit(out_dir)
@@ -62,6 +75,7 @@ class Worker(QThread):
             progress_val = int((i / total) * 100)
             self.progress.emit(progress_val)
 
+        self.step_progress.emit("完成", total, total)
         self.finished.emit(output_dirs)
 
     def stop(self):

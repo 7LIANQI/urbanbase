@@ -1,29 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""城市街道环境大数据采集 —— 核心采集管线。"""
-import os
+"""城市街道环境大数据采集 —— 核心采集管线。
+
+重构为采集器架构：每种数据源由独立的 Collector 类负责，
+process_location() 作为轻量编排器遍历已启用的采集器。
+支持并行采集以提高吞吐量。
+"""
 import json
-import time
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
-import ee
-
 from utils import make_logger
-from plugins import (
-    get_air_quality_by_lonlat,
-    get_weather_by_lonlat,
-    get_streetview_metadata,
-    download_streetview_image,
-    initialize_gee,
-    get_gee_stats,
-    get_era5_climate_stats,
-    get_era5_hourly_stats,
-    get_elevation_stats,
-    get_precipitation_stats,
-    get_ndwi_evi_stats,
-    get_population_stats,
-    get_osm_vector_data,
-    compute_osm_stats,
+from collectors import (
+    AirQualityCollector,
+    WeatherCollector,
+    StreetViewCollector,
+    GEECollector,
+    OSMCollector,
 )
 
 # 默认选项：全部启用
@@ -75,28 +69,104 @@ def _any_osm(options):
     return any(_opt(options, k) for k in osm_keys)
 
 
+def _resolve_proxies(proxy_config):
+    """解析代理配置，返回各服务的代理字典。
+
+    Returns:
+        dict: {
+            "air_proxy": dict or None,
+            "street_proxy": dict or None,
+            "gee_proxy": str or None,
+            "osm_proxy": dict or None,
+        }
+    """
+    if not proxy_config:
+        return {
+            "air_proxy": None,
+            "street_proxy": None,
+            "gee_proxy": None,
+            "osm_proxy": None,
+        }
+    pc = proxy_config
+    proxy_url = pc.get("url", "").strip()
+    _proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+    return {
+        "air_proxy": _proxies if pc.get("air", True) else None,
+        "street_proxy": _proxies if pc.get("street", False) else None,
+        "gee_proxy": proxy_url if pc.get("gee", True) else None,
+        "osm_proxy": _proxies if pc.get("osm", True) else None,
+    }
+
+
+def _build_collectors(lon, lat, radius, start_date, end_date,
+                      output_dir, log, options, proxy_map, baidu_key,
+                      openweather_key, gee_key_path, log_callback):
+    """构建所有启用的采集器实例。"""
+    common = dict(
+        lon=lon, lat=lat, radius=radius,
+        start_date=start_date, end_date=end_date,
+        output_dir=output_dir, log=log,
+        log_callback=log_callback,
+        options=options,
+    )
+
+    collectors = []
+
+    if _opt(options, "air_quality"):
+        collectors.append(AirQualityCollector(
+            **common,
+            openweather_key=openweather_key,
+            air_proxy=proxy_map["air_proxy"],
+        ))
+
+    if _opt(options, "weather"):
+        collectors.append(WeatherCollector(
+            **common,
+            openweather_key=openweather_key,
+            air_proxy=proxy_map["air_proxy"],
+        ))
+
+    if _opt(options, "streetview"):
+        collectors.append(StreetViewCollector(
+            **common,
+            baidu_key=baidu_key,
+            street_proxy=proxy_map["street_proxy"],
+        ))
+
+    if _any_gee(options):
+        collectors.append(GEECollector(
+            **common,
+            gee_key_path=gee_key_path,
+            gee_proxy=proxy_map["gee_proxy"],
+        ))
+
+    if _any_osm(options):
+        collectors.append(OSMCollector(
+            **common,
+            osm_proxy=proxy_map["osm_proxy"],
+        ))
+
+    return collectors
+
+
 def process_location(lon, lat, radius=500, start_date=None, end_date=None,
                      baidu_key=None, openweather_key=None, gee_key_path=None,
                      log_callback=None, output_base_dir=None,
-                     proxy_config=None, options=None):
+                     proxy_config=None, options=None,
+                     parallel=True, step_callback=None):
     """采集指定位置的所有城市环境数据。
 
     Args:
         options: 可选，细粒度控制 dict。为 None 时全部启用。
-            可用键见 _DEFAULT_OPTIONS。
-        proxy_config: 可选，分服务代理配置 dict：
-            {"url": "http://127.0.0.1:7890",
-             "air": True,     # OpenWeatherMap 走代理
-             "street": False,  # 百度直连（走代理会被拒）
-             "gee": True,      # GEE 走代理
-             "osm": True}      # OSM 走代理
+        proxy_config: 可选，分服务代理配置 dict。
+        parallel: 是否启用并行采集（默认 True）。
+            - True: 空气质量/天气/街景/GEE/OSM 并行执行
+            - False: 串行执行（与旧版行为一致，便于调试）
     """
     log = make_logger(log_callback)
 
     # 解析代理配置
-    pc = proxy_config or {}
-    proxy_url = pc.get("url", "").strip()
-    _proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+    proxy_map = _resolve_proxies(proxy_config)
 
     if start_date is None or end_date is None:
         end = datetime.now()
@@ -118,213 +188,55 @@ def process_location(lon, lat, radius=500, start_date=None, end_date=None,
         "files": {},
     }
 
-    # ================================================================
-    #  空气质量
-    # ================================================================
-    if _opt(options, "air_quality"):
-        log("获取空气质量...")
-        if openweather_key:
-            air_proxy = _proxies if pc.get("air", True) else None
-            air_data = get_air_quality_by_lonlat(
-                lon, lat, openweather_key,
-                log_callback=log_callback, proxies=air_proxy,
-            )
-            if air_data:
-                air_path = os.path.join(out_dir, "air_quality.json")
-                with open(air_path, "w", encoding="utf-8") as f:
-                    json.dump(air_data, f, ensure_ascii=False, indent=2)
-                index["files"]["air_quality"] = air_path
-                log(f"  AQI 等级: {air_data['now']['aqi']}")
-            else:
-                log("空气质量获取失败")
-        else:
-            log("⚠️ 未提供 OpenWeatherMap Key")
+    # 构建采集器列表
+    collectors = _build_collectors(
+        lon, lat, radius, start_date, end_date,
+        out_dir, log, options, proxy_map,
+        baidu_key, openweather_key, gee_key_path, log_callback,
+    )
+
+    if not collectors:
+        log("⚠️ 未启用任何数据采集模块")
+        return out_dir
+
+    # 执行采集
+    total = len(collectors)
+    if step_callback:
+        step_callback("准备采集", 0, total)
+
+    if parallel and total > 1:
+        log(f"🚀 并行采集 {total} 个数据模块...")
+        completed = 0
+        with ThreadPoolExecutor(max_workers=min(total, 5)) as executor:
+            future_map = {
+                executor.submit(c.collect): c
+                for c in collectors
+            }
+            for future in as_completed(future_map):
+                collector = future_map[future]
+                try:
+                    files = future.result()
+                    if files:
+                        index["files"].update(files)
+                except Exception as e:
+                    log(f"⚠️ {collector.collector_name} 采集失败: {e}")
+                completed += 1
+                if step_callback:
+                    step_callback(collector.collector_name, completed, total)
     else:
-        log("⏭️ 空气质量已禁用")
-
-    # ================================================================
-    #  实时天气
-    # ================================================================
-    if _opt(options, "weather"):
-        log("获取实时天气...")
-        if openweather_key:
-            air_proxy = _proxies if pc.get("air", True) else None
-            weather_data = get_weather_by_lonlat(
-                lon, lat, openweather_key,
-                log_callback=log_callback, proxies=air_proxy,
-            )
-            if weather_data:
-                weather_path = os.path.join(out_dir, "weather.json")
-                with open(weather_path, "w", encoding="utf-8") as f:
-                    json.dump(weather_data, f, ensure_ascii=False, indent=2)
-                index["files"]["weather"] = weather_path
-                w = weather_data["now"]
-                log(f"  气温: {w['temp_c']}℃, 湿度: {w['humidity']}%, 天气: {w['weather']}")
-            else:
-                log("天气数据获取失败")
-        else:
-            log("⚠️ 未提供 OpenWeatherMap Key，跳过天气")
-    else:
-        log("⏭️ 天气已禁用")
-
-    # ================================================================
-    #  街景
-    # ================================================================
-    if _opt(options, "streetview"):
-        log("获取街景（百度）...")
-        sv_proxy = _proxies if pc.get("street", False) else None
-        has_view = get_streetview_metadata(
-            lon, lat, baidu_key or "", log_callback=log_callback, proxies=sv_proxy,
-        )
-        if has_view:
-            img_dir = os.path.join(out_dir, "streetview_images")
-            os.makedirs(img_dir, exist_ok=True)
-            for angle in [0, 90, 180, 270]:
-                img_path = os.path.join(img_dir, f"heading_{angle}.jpg")
-                success = download_streetview_image(
-                    lon, lat, angle, 0, baidu_key or "", img_path,
-                    log_callback=log_callback, proxies=sv_proxy,
-                )
-                if success:
-                    index["files"].setdefault("streetview_images", []).append(img_path)
-                time.sleep(0.15)
-
-            meta_path = os.path.join(out_dir, "streetview_status.txt")
-            with open(meta_path, "w", encoding="utf-8") as f:
-                f.write("Baidu Street View Available")
-            index["files"]["streetview_metadata"] = meta_path
-        else:
-            log("⚠️ 该地点无百度街景覆盖或请求失败")
-    else:
-        log("⏭️ 街景已禁用")
-
-    # ================================================================
-    #  GEE 遥感
-    # ================================================================
-    if _any_gee(options):
-        log("初始化 GEE...")
-        gee_proxy = proxy_url if pc.get("gee", True) else None
-        initialize_gee(key_path=gee_key_path, log_callback=log_callback,
-                       proxy_url=gee_proxy)
-        try:
-            roi_geometry = ee.Geometry.Point(lon, lat).buffer(radius).bounds()
-
-            # ---- VIIRS / NDVI / LST（合并函数，按需执行） ----
-            any_core = any([
-                _opt(options, "gee_viirs"),
-                _opt(options, "gee_ndvi"),
-                _opt(options, "gee_lst"),
-            ])
-            if any_core:
-                log("计算核心遥感指标...")
-                get_gee_stats(
-                    roi_geometry, start_date, end_date, out_dir,
-                    log_callback=log_callback,
-                    enable_viirs=_opt(options, "gee_viirs"),
-                    enable_ndvi=_opt(options, "gee_ndvi"),
-                    enable_lst=_opt(options, "gee_lst"),
-                )
-                if _opt(options, "gee_viirs"):
-                    index["files"]["viirs_stats"] = os.path.join(out_dir, "viirs_stats.csv")
-                if _opt(options, "gee_ndvi"):
-                    index["files"]["ndvi_stats"] = os.path.join(out_dir, "ndvi_stats.csv")
-                if _opt(options, "gee_lst"):
-                    index["files"]["lst_stats"] = os.path.join(out_dir, "lst_stats.csv")
-            else:
-                log("⏭️ 核心遥感指标已禁用")
-
-            # ---- 海拔 ----
-            if _opt(options, "gee_elevation"):
-                log("获取海拔数据...")
-                get_elevation_stats(roi_geometry, out_dir, log_callback=log_callback)
-                index["files"]["elevation_stats"] = os.path.join(out_dir, "elevation_stats.csv")
-            else:
-                log("⏭️ 海拔数据已禁用")
-
-            # ---- 降水 ----
-            if _opt(options, "gee_precipitation"):
-                log("获取降水数据...")
-                get_precipitation_stats(roi_geometry, start_date, end_date, out_dir,
-                                        log_callback=log_callback)
-                index["files"]["precipitation_stats"] = os.path.join(out_dir, "precipitation_stats.csv")
-            else:
-                log("⏭️ 降水数据已禁用")
-
-            # ---- NDWI + EVI ----
-            any_veg = _opt(options, "gee_ndwi") or _opt(options, "gee_evi")
-            if any_veg:
-                log("获取 NDWI/EVI 数据...")
-                get_ndwi_evi_stats(
-                    roi_geometry, start_date, end_date, out_dir,
-                    log_callback=log_callback,
-                    enable_ndwi=_opt(options, "gee_ndwi"),
-                    enable_evi=_opt(options, "gee_evi"),
-                )
-                if _opt(options, "gee_ndwi"):
-                    index["files"]["ndwi_stats"] = os.path.join(out_dir, "ndwi_stats.csv")
-                if _opt(options, "gee_evi"):
-                    index["files"]["evi_stats"] = os.path.join(out_dir, "evi_stats.csv")
-            else:
-                log("⏭️ NDWI/EVI 已禁用")
-
-            # ---- 人口密度 ----
-            if _opt(options, "gee_population"):
-                log("获取人口密度数据...")
-                get_population_stats(roi_geometry, out_dir, log_callback=log_callback)
-                index["files"]["population_stats"] = os.path.join(out_dir, "population_stats.csv")
-            else:
-                log("⏭️ 人口密度已禁用")
-
-            # ---- ERA5 气候逐日 ----
-            if _opt(options, "gee_era5_climate"):
-                log("计算 ERA5 气候逐日数据...")
-                get_era5_climate_stats(roi_geometry, start_date, end_date, out_dir,
-                                       log_callback=log_callback)
-                index["files"]["era5_climate_stats"] = os.path.join(out_dir, "era5_climate_stats.csv")
-            else:
-                log("⏭️ ERA5 气候逐日已禁用")
-
-            # ---- ERA5 逐时 ----
-            if _opt(options, "gee_era5_hourly"):
-                latest_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-                log(f"计算 ERA5 逐时数据（{latest_date}）...")
-                get_era5_hourly_stats(roi_geometry, latest_date, out_dir,
-                                      log_callback=log_callback)
-                index["files"]["era5_hourly"] = os.path.join(out_dir, "era5_hourly.csv")
-            else:
-                log("⏭️ ERA5 逐时已禁用")
-
-        except Exception as e:
-            log(f"⚠️ GEE 数据处理失败: {e}")
-    else:
-        log("⏭️ 遥感数据模块已禁用")
-
-    # ================================================================
-    #  OSM 矢量数据
-    # ================================================================
-    if _any_osm(options):
-        log("下载 OSM 矢量数据...")
-        osm_proxy = _proxies if pc.get("osm", True) else None
-        get_osm_vector_data(lon, lat, radius, out_dir,
-                            log_callback=log_callback, proxies=osm_proxy)
-        if _opt(options, "osm_roads"):
-            index["files"]["osm_roads"] = os.path.join(out_dir, "roads.geojson")
-        if _opt(options, "osm_buildings"):
-            index["files"]["osm_buildings"] = os.path.join(out_dir, "buildings.geojson")
-        if _opt(options, "osm_green_spaces"):
-            index["files"]["osm_green_spaces"] = os.path.join(out_dir, "green_spaces.geojson")
-        if _opt(options, "osm_water_bodies"):
-            index["files"]["osm_water_bodies"] = os.path.join(out_dir, "water_bodies.geojson")
-
-        # OSM 统计指标
-        if _opt(options, "osm_stats"):
-            log("计算 OSM 统计指标...")
-            compute_osm_stats(out_dir, radius, log_callback=log_callback)
-            index["files"]["osm_stats"] = os.path.join(out_dir, "osm_stats.json")
-        else:
-            log("⏭️ OSM 统计指标已禁用")
-    else:
-        log("⏭️ OSM 矢量数据模块已禁用")
+        log(f"🔗 串行采集 {total} 个数据模块...")
+        for i, c in enumerate(collectors, 1):
+            log(f"  ▶ {c.collector_name}")
+            if step_callback:
+                step_callback(c.collector_name, i - 1, total)
+            try:
+                files = c.collect()
+                if files:
+                    index["files"].update(files)
+            except Exception as e:
+                log(f"⚠️ {c.collector_name} 采集失败: {e}")
+            if step_callback:
+                step_callback(c.collector_name, i, total)
 
     # ---- 保存索引 ----
     index_path = os.path.join(out_dir, "index.json")

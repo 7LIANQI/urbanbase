@@ -23,6 +23,13 @@ dependencies = [
 [project.optional-dependencies]
 # 遥感模块依赖较重，可作为可选
 remote-sensing = ["earthengine-api>=1.7.26"]
+test = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = ["-v", "--tb=short"]
 
 [project.scripts]
 urban-analytics = "app:main"    # 需要 app.py 中定义 main()

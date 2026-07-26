@@ -21,8 +21,23 @@ QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 from ui.main_window import MainWindow
 
 
-if __name__ == "__main__":
+def main():
+    """应用入口函数（供 pyproject.toml [project.scripts] 调用）。"""
     app = QApplication(sys.argv)
+
+    # 检测系统主题并应用
+    try:
+        from styles import apply_theme, get_current_mpl_rcparams
+        is_dark = apply_theme(app, get_current_mpl_rcparams())
+        if is_dark:
+            print("🌙 已启用暗色模式")
+    except ImportError:
+        pass  # styles.py 不存在时跳过
+
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

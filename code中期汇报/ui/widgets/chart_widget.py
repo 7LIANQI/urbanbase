@@ -8,8 +8,17 @@ from PyQt6.QtWidgets import (
     QLabel, QComboBox,
 )
 
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import (
+    FigureCanvasQTAgg as FigureCanvas,
+    NavigationToolbar2QT as NavigationToolbar,
+)
 from matplotlib.figure import Figure
+
+try:
+    import mplcursors
+    HAS_MPLCURSORS = True
+except ImportError:
+    HAS_MPLCURSORS = False
 
 
 class ChartWidget(QWidget):
@@ -32,6 +41,7 @@ class ChartWidget(QWidget):
         super().__init__(parent)
         self.current_dir = None
         self.enabled = True
+        self._cursor = None  # 保持 mplcursors 引用防止 GC
         self._init_ui()
 
     def _init_ui(self):
@@ -55,6 +65,11 @@ class ChartWidget(QWidget):
         self.figure = Figure(figsize=(8, 4), dpi=80)
         self.canvas = FigureCanvas(self.figure)
         layout.addWidget(self.canvas)
+
+        # Matplotlib 交互工具栏
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        self.toolbar.setMaximumHeight(32)
+        layout.addWidget(self.toolbar)
 
         self.setLayout(layout)
 
@@ -125,6 +140,7 @@ class ChartWidget(QWidget):
                                   "相对湿度 (%)", '#2980b9')
 
             self.figure.tight_layout()
+            self._add_cursor(ax)
             self.canvas.draw()
         except Exception as e:
             ax.text(0.5, 0.5, f"无法加载数据:\n{str(e)}",
@@ -243,3 +259,24 @@ class ChartWidget(QWidget):
         ax.tick_params(axis='x', labelsize=8)
         ax.tick_params(axis='y', labelsize=8)
         ax.grid(True, linestyle='--', alpha=0.7)
+
+    def _add_cursor(self, ax):
+        """添加悬停数据提示（如 mplcursors 可用）。"""
+        if not HAS_MPLCURSORS:
+            return
+        # 移除旧 cursor 避免重复
+        if self._cursor is not None:
+            try:
+                self._cursor.remove()
+            except Exception:
+                pass
+        try:
+            self._cursor = mplcursors.cursor(ax, hover=mplcursors.HoverMode.Transient)
+            self._cursor.connect(
+                "add",
+                lambda sel: sel.annotation.set_text(
+                    f"x={sel.target[0]:.5}\ny={sel.target[1]:.5}"
+                ),
+            )
+        except Exception:
+            pass

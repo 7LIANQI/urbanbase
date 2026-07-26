@@ -1,6 +1,9 @@
 """公共工具函数模块。"""
+import functools
 import logging
 import os
+import time
+import traceback
 from datetime import datetime
 
 
@@ -68,3 +71,153 @@ class FileLogger:
         self._logger.error(msg)
         if self._gui_cb:
             self._gui_cb(f"❌ {msg}")
+
+
+# ==================== 网络重试 ====================
+
+def retry_on_network_error(max_retries=3, base_delay=1.0, backoff=2.0):
+    """网络请求重试装饰器。
+
+    在 requests.RequestException 或 ee.EEException 上自动重试，
+    使用指数退避策略。重试耗尽后抛出原始异常。
+
+    Args:
+        max_retries: 最大重试次数（不含首次调用）
+        base_delay: 首次重试等待秒数
+        backoff: 退避倍数
+
+    用法:
+        @retry_on_network_error(max_retries=3)
+        def fetch_data():
+            return requests.get(url, timeout=10)
+    """
+    import requests as _requests
+    try:
+        import ee as _ee
+        _EE_EXCEPTION = _ee.EEException
+    except ImportError:
+        _EE_EXCEPTION = Exception  # GEE 未安装时回退
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_error = None
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except (_requests.RequestException, _EE_EXCEPTION) as e:
+                    last_error = e
+                    if attempt < max_retries:
+                        delay = base_delay * (backoff ** attempt)
+                        print(f"⚠️ 网络请求失败 (第{attempt+1}次), "
+                              f"{delay:.1f}s 后重试: {e}")
+                        time.sleep(delay)
+                    else:
+                        print(f"❌ 网络请求重试{max_retries}次后仍失败: {e}")
+                        raise
+            raise last_error  # type: ignore[misc]
+        return wrapper
+    return decorator
+
+
+# ==================== 密钥混淆存储 ====================
+
+def _get_machine_salt():
+    """获取机器相关的盐值（用于密钥混淆）。
+
+    注意：这是混淆（obfuscation）而非加密（encryption）。
+    任何有权限读取本机文件的人都可以逆向出原始密钥。
+    如需真正的安全存储，请使用 Windows 凭据管理器或 keyring 库。
+    """
+    import uuid
+    return str(uuid.getnode())
+
+
+def obfuscate(text):
+    """对文本进行简单混淆（Base64 + XOR）。
+
+    警告：仅用于防止明文存储，不提供真正的加密安全。
+    """
+    import base64
+    salt = _get_machine_salt()
+    # XOR each character with repeating salt bytes
+    salt_bytes = salt.encode("utf-8")
+    text_bytes = text.encode("utf-8")
+    result = bytearray()
+    for i, b in enumerate(text_bytes):
+        result.append(b ^ salt_bytes[i % len(salt_bytes)])
+    return base64.urlsafe_b64encode(bytes(result)).decode("ascii")
+
+
+def deobfuscate(encoded):
+    """反向解混淆。
+
+    Returns:
+        原始文本，或空字符串（解码失败时）。
+    """
+    import base64
+    try:
+        salt = _get_machine_salt()
+        salt_bytes = salt.encode("utf-8")
+        data = base64.urlsafe_b64decode(encoded.encode("ascii"))
+        result = bytearray()
+        for i, b in enumerate(data):
+            result.append(b ^ salt_bytes[i % len(salt_bytes)])
+        return bytes(result).decode("utf-8")
+    except Exception:
+        return ""
+
+
+def secure_store(key, value):
+    """安全存储敏感值（混淆后保存到文件）。
+
+    Args:
+        key: 键名
+        value: 要存储的值（明文）
+
+    Returns:
+        混淆后的值（可直接存入 QSettings）
+    """
+    if not value:
+        return ""
+    return obfuscate(value)
+
+
+def secure_load(key, obfuscated_value):
+    """从混淆值恢复明文。
+
+    Args:
+        key: 键名（保留用于未来扩展）
+        obfuscated_value: 混淆后的字符串
+
+    Returns:
+        原始明文值
+    """
+    if not obfuscated_value:
+        return ""
+    return deobfuscate(obfuscated_value)
+
+
+def safe_call(func, *args, default=None, log_func=None, **kwargs):
+    """安全调用函数，捕获常见异常并记录。
+
+    Args:
+        func: 要调用的函数
+        *args: 位置参数
+        default: 异常时返回的默认值
+        log_func: 日志回调
+        **kwargs: 关键字参数
+
+    Returns:
+        func 的返回值，或 default（发生异常时）
+    """
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        msg = f"调用 {getattr(func, '__name__', str(func))} 时出错: {e}"
+        if log_func:
+            log_func(msg)
+        else:
+            print(msg)
+            traceback.print_exc()
+        return default

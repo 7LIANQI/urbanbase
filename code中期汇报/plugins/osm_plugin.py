@@ -51,8 +51,10 @@ def get_osm_vector_data(center_lon, center_lat, radius_m, output_dir,
                 log("  路网数据为空，跳过保存")
         else:
             log("  未找到路网数据")
-    except Exception as e:
+    except (ValueError, TypeError, AttributeError) as e:
         log(f"  获取路网数据失败: {e}")
+    except OSError as e:
+        log(f"  保存路网数据失败: {e}")
 
     # ---- 建筑 ----
     try:
@@ -61,8 +63,10 @@ def get_osm_vector_data(center_lon, center_lat, radius_m, output_dir,
             buildings.to_file(os.path.join(output_dir, "buildings.geojson"), driver="GeoJSON")
         else:
             log("  未找到建筑物数据")
-    except Exception as e:
+    except (ValueError, TypeError, AttributeError) as e:
         log(f"  获取建筑物数据失败: {e}")
+    except OSError as e:
+        log(f"  保存建筑物数据失败: {e}")
 
     # ---- 绿地 ----
     try:
@@ -76,8 +80,10 @@ def get_osm_vector_data(center_lon, center_lat, radius_m, output_dir,
             green.to_file(os.path.join(output_dir, "green_spaces.geojson"), driver="GeoJSON")
         else:
             log("  未找到绿地数据")
-    except Exception as e:
+    except (ValueError, TypeError, AttributeError) as e:
         log(f"  获取绿地数据失败: {e}")
+    except OSError as e:
+        log(f"  保存绿地数据失败: {e}")
 
     # ---- 水体 (通过 osmnx，稳健的重试+缓存机制) ----
     try:
@@ -91,8 +97,10 @@ def get_osm_vector_data(center_lon, center_lat, radius_m, output_dir,
             water.to_file(os.path.join(output_dir, "water_bodies.geojson"), driver="GeoJSON")
         else:
             log("  未找到水体数据（该区域可能无水域）")
-    except Exception as e:
+    except (ValueError, TypeError, AttributeError) as e:
         log(f"  获取水体数据失败: {e}")
+    except OSError as e:
+        log(f"  保存水体数据失败: {e}")
 
     # 清理代理设置
     if proxies:

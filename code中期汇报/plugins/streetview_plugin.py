@@ -18,8 +18,10 @@ import requests
 
 from utils import make_logger
 
-# ---- 模块级缓存 ----
-_panoid_cache = {}   # key="lon,lat" -> panoid | None
+# ---- 模块级缓存（带 TTL） ----
+_CACHE_TTL_SECONDS = 600  # 10 分钟过期
+
+_panoid_cache = {}  # key="lon,lat" -> (panoid, date_str, timestamp)
 
 
 # ============================================================
@@ -102,8 +104,11 @@ def _wgs84_to_bd09mc_remote(lon, lat, ak, log):
         else:
             log(f"geoconv API 失败: status={data.get('status')} {data.get('message', '')}")
             return None, None
-    except Exception as e:
-        log(f"geoconv API 异常: {e}")
+    except requests.RequestException as e:
+        log(f"geoconv API 网络异常: {e}")
+        return None, None
+    except (ValueError, KeyError, TypeError) as e:
+        log(f"geoconv API 响应解析异常: {e}")
         return None, None
 
 
@@ -131,7 +136,12 @@ def _find_panoid(lon, lat, ak, log):
     cache_key = f"{lon},{lat}"
     if cache_key in _panoid_cache:
         entry = _panoid_cache[cache_key]
-        return entry if isinstance(entry, tuple) else (entry, None)
+        if isinstance(entry, tuple) and len(entry) >= 3:
+            panoid, date_str, cached_time = entry
+            if time.time() - cached_time < _CACHE_TTL_SECONDS:
+                return panoid, date_str
+        # 过期或旧格式，删除缓存条目
+        del _panoid_cache[cache_key]
 
     x, y = _to_bd09mc(lon, lat, ak, log)
     log(f"BD09MC 坐标: x={x:.2f}, y={y:.2f}")
@@ -166,14 +176,16 @@ def _find_panoid(lon, lat, ak, log):
             else:
                 log(f"✅ 找到 panoid: {panoid}")
 
-            _panoid_cache[cache_key] = (panoid, date_str)
+            _panoid_cache[cache_key] = (panoid, date_str, time.time())
             return panoid, date_str
 
         log(f"未找到 panoid，响应片段: {resp.text[:200]}")
-    except Exception as e:
-        log(f"查找 panoid 异常: {e}")
+    except requests.RequestException as e:
+        log(f"查找 panoid 网络异常: {e}")
+    except (ValueError, TypeError, AttributeError) as e:
+        log(f"查找 panoid 解析异常: {e}")
 
-    _panoid_cache[cache_key] = (None, None)
+    _panoid_cache[cache_key] = (None, None, time.time())
     return None, None
 
 
@@ -204,8 +216,11 @@ def _download_directional(panoid, heading, save_path, log):
         else:
             log(f"heading={heading}° 下载失败: HTTP {resp.status_code} ct={ct}")
             return False
-    except Exception as e:
-        log(f"heading={heading}° 下载异常: {e}")
+    except requests.RequestException as e:
+        log(f"heading={heading}° 下载网络异常: {e}")
+        return False
+    except OSError as e:
+        log(f"heading={heading}° 文件写入失败: {e}")
         return False
 
 
@@ -215,10 +230,15 @@ def _download_directional(panoid, heading, save_path, log):
 
 def get_streetview_metadata(lon, lat, ak, log_callback=None, *,
                             coordtype="wgs84ll", proxies=None):
-    """探测指定坐标是否有百度街景覆盖。"""
+    """探测指定坐标是否有百度街景覆盖。
+
+    Returns:
+        (has_view, date_str): has_view 为 bool，date_str 为拍摄日期字符串（如 "202211"）或 None。
+        旧版调用者若只取 bool 值: `has_view = get_streetview_metadata(...)` 仍然兼容。
+    """
     log = make_logger(log_callback)
     panoid, date_str = _find_panoid(lon, lat, ak, log)
-    return panoid is not None
+    return (panoid is not None, date_str)
 
 
 def download_streetview_image(lon, lat, heading, pitch, ak, save_path,

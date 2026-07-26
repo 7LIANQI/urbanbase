@@ -2,10 +2,29 @@
 
 使用 Current Weather API，与空气质量共用同一个 API Key。
 """
-from utils import make_logger
+import json as _json
+
+import requests
+
+from utils import make_logger, retry_on_network_error
 
 # OpenWeatherMap Current Weather API
 OPENWEATHER_WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
+
+
+@retry_on_network_error(max_retries=2, base_delay=0.5)
+def _fetch_weather(lon, lat, api_key, proxies):
+    """实际发起天气 API 请求（带重试）。"""
+    return requests.get(
+        OPENWEATHER_WEATHER_URL,
+        params={
+            "lat": lat, "lon": lon,
+            "appid": api_key,
+            "units": "metric",   # 摄氏度
+            "lang": "zh_cn",     # 中文天气描述
+        },
+        timeout=10, proxies=proxies,
+    )
 
 
 def get_weather_by_lonlat(lon, lat, api_key, log_callback=None, proxies=None):
@@ -29,18 +48,10 @@ def get_weather_by_lonlat(lon, lat, api_key, log_callback=None, proxies=None):
             }
         }
     """
-    import requests
     log = make_logger(log_callback)
 
-    params = {
-        "lat": lat, "lon": lon,
-        "appid": api_key,
-        "units": "metric",   # 摄氏度
-        "lang": "zh_cn",     # 中文天气描述
-    }
     try:
-        resp = requests.get(OPENWEATHER_WEATHER_URL, params=params,
-                            timeout=10, proxies=proxies)
+        resp = _fetch_weather(lon, lat, api_key, proxies)
         if resp.status_code == 200:
             data = resp.json()
             return {
@@ -59,6 +70,10 @@ def get_weather_by_lonlat(lon, lat, api_key, log_callback=None, proxies=None):
             }
         else:
             log(f"天气 API 返回 HTTP {resp.status_code}")
-    except Exception as e:
+    except requests.RequestException as e:
         log(f"天气数据请求异常: {e}")
+    except _json.JSONDecodeError as e:
+        log(f"天气数据响应解析失败: {e}")
+    except (ValueError, KeyError, TypeError) as e:
+        log(f"天气数据结构异常: {e}")
     return None

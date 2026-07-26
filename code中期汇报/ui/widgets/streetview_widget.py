@@ -43,6 +43,13 @@ class StreetViewWidget(QWidget):
             }
         """)
         layout.addWidget(self.image_label)
+
+        # 拍摄日期标签
+        self.date_label = QLabel("")
+        self.date_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.date_label.setStyleSheet("color: #888; font-size: 12px; padding: 4px;")
+        layout.addWidget(self.date_label)
+
         self.setLayout(layout)
 
     def set_enabled(self, enabled):
@@ -53,9 +60,30 @@ class StreetViewWidget(QWidget):
     def set_output_dir(self, output_dir):
         self.current_dir = output_dir
         if self.enabled:
+            self._load_date()
             self._load_image()
         else:
             self.image_label.setText("街景显示已禁用（采集时未勾选）")
+            self.date_label.setText("")
+
+    def _load_date(self):
+        """从 streetview_status.txt 读取拍摄日期。"""
+        if not self.current_dir:
+            self.date_label.setText("")
+            return
+        status_path = Path(self.current_dir) / "streetview_status.txt"
+        if not status_path.exists():
+            self.date_label.setText("")
+            return
+        try:
+            with open(status_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("拍摄时间:"):
+                        self.date_label.setText(f"📅 {line.strip()}")
+                        return
+            self.date_label.setText("")
+        except Exception:
+            self.date_label.setText("")
 
     def _load_image(self):
         if not self.enabled:

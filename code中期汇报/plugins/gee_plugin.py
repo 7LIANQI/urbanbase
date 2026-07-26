@@ -227,6 +227,22 @@ def get_gee_stats(roi_geometry, start_date, end_date, output_dir, log_callback=N
         log("  ⏭️ 地表温度已禁用")
 
 
+def _process_era5_hourly(img):
+    """ERA5 逐时数据处理 —— 将原始波段转换为气温/辐射/湿度。
+
+    此函数被 get_era5_climate_stats 和 get_era5_hourly_stats 共用。
+    """
+    temp_c = img.select('temperature_2m').subtract(273.15)
+    dew_c = img.select('dewpoint_temperature_2m').subtract(273.15)
+    solar_w = img.select('surface_solar_radiation_downwards').divide(3600)
+    a = temp_c.multiply(17.625).divide(temp_c.add(243.04)).exp()
+    b = dew_c.multiply(17.625).divide(dew_c.add(243.04)).exp()
+    rh = b.divide(a).multiply(100).rename('humidity')
+    return img.addBands([
+        temp_c.rename('temp_c'), solar_w.rename('solar_w'), rh,
+    ])
+
+
 def get_era5_climate_stats(roi_geometry, start_date, end_date, output_dir,
                            log_callback=None):
     """获取 ERA5-Land 气候逐日数据（日聚合方式，避免逐时 getInfo 超时）。
@@ -254,19 +270,13 @@ def get_era5_climate_stats(roi_geometry, start_date, end_date, output_dir,
         ])
     )
 
-    def process_hourly(img):
-        temp_c = img.select('temperature_2m').subtract(273.15)
-        dew_c = img.select('dewpoint_temperature_2m').subtract(273.15)
-        solar_w = img.select('surface_solar_radiation_downwards').divide(3600)
-        sunshine = solar_w.gt(120).rename('sunshine')
-        a = temp_c.multiply(17.625).divide(temp_c.add(243.04)).exp()
-        b = dew_c.multiply(17.625).divide(dew_c.add(243.04)).exp()
-        rh = b.divide(a).multiply(100).rename('humidity')
-        return img.addBands([
-            temp_c.rename('temp_c'), solar_w.rename('solar_w'), sunshine, rh,
-        ])
+    def process_hourly_with_sunshine(img):
+        """带日照标记的逐时处理（仅用于逐日聚合）。"""
+        img = _process_era5_hourly(img)
+        sunshine = img.select('solar_w').gt(120).rename('sunshine')
+        return img.addBands(sunshine)
 
-    processed = era5.map(process_hourly).select(
+    processed = era5.map(process_hourly_with_sunshine).select(
         ['temp_c', 'solar_w', 'sunshine', 'humidity'])
 
     # 服务端按天聚合
@@ -359,16 +369,8 @@ def get_era5_hourly_stats(roi_geometry, target_date, output_dir,
     )
 
     def process_hourly(img):
-        temp_c = img.select('temperature_2m').subtract(273.15)
-        dew_c = img.select('dewpoint_temperature_2m').subtract(273.15)
-        solar_w = img.select('surface_solar_radiation_downwards').divide(3600)
-        a = temp_c.multiply(17.625).divide(temp_c.add(243.04)).exp()
-        b = dew_c.multiply(17.625).divide(dew_c.add(243.04)).exp()
-        rh = b.divide(a).multiply(100).rename('humidity')
-
-        stats = img.addBands([
-            temp_c.rename('temp_c'), solar_w.rename('solar_w'), rh,
-        ]).reduceRegion(
+        img = _process_era5_hourly(img)
+        stats = img.reduceRegion(
             reducer=ee.Reducer.mean(), geometry=roi_geometry,
             scale=11132, maxPixels=1e9,
         )

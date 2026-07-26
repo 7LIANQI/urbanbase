@@ -15,8 +15,17 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import (
+    FigureCanvasQTAgg as FigureCanvas,
+    NavigationToolbar2QT as NavigationToolbar,
+)
 from matplotlib.figure import Figure
+
+try:
+    import mplcursors
+    HAS_MPLCURSORS = True
+except ImportError:
+    HAS_MPLCURSORS = False
 
 
 class WeatherWidget(QWidget):
@@ -30,6 +39,7 @@ class WeatherWidget(QWidget):
         super().__init__(parent)
         self.current_dir = None
         self.enabled = True
+        self._cursor = None
         self._init_ui()
 
     def _init_ui(self):
@@ -78,6 +88,10 @@ class WeatherWidget(QWidget):
         self.figure = Figure(figsize=(8, 4), dpi=80)
         self.canvas = FigureCanvas(self.figure)
         chart_layout.addWidget(self.canvas)
+        # 交互工具栏
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        self.toolbar.setMaximumHeight(32)
+        chart_layout.addWidget(self.toolbar)
         self.chart_info = QLabel("")
         self.chart_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         chart_layout.addWidget(self.chart_info)
@@ -231,6 +245,7 @@ class WeatherWidget(QWidget):
             ax.set_title("ERA5 24小时逐时气象", fontsize=12)
             ax.grid(True, linestyle='--', alpha=0.5)
             self.figure.tight_layout()
+            self._add_cursor()
             self.canvas.draw()
 
             self.chart_info.setText(
@@ -299,6 +314,7 @@ class WeatherWidget(QWidget):
             lines2, labels2 = ax2.get_legend_handles_labels()
             ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc='upper left')
             self.figure.tight_layout()
+            self._add_cursor()
             self.canvas.draw()
 
             self.chart_info.setText(
@@ -308,6 +324,27 @@ class WeatherWidget(QWidget):
             )
         except Exception as e:
             self._show_chart_error(f"加载逐日数据失败:\n{str(e)[:100]}")
+
+    # ==================== 交互提示 ====================
+
+    def _add_cursor(self):
+        """添加悬停数据提示（如 mplcursors 可用）。"""
+        if not HAS_MPLCURSORS:
+            return
+        if self._cursor is not None:
+            try:
+                self._cursor.remove()
+            except Exception:
+                pass
+        try:
+            self._cursor = mplcursors.cursor(hover=mplcursors.HoverMode.Transient)
+            @self._cursor.connect("add")
+            def _on_add(sel):
+                sel.annotation.set_text(
+                    f"x={sel.target[0]:.5}\ny={sel.target[1]:.5}"
+                )
+        except Exception:
+            pass
 
     # ==================== 摘要统计 ====================
 
