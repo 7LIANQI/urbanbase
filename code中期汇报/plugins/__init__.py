@@ -12,6 +12,13 @@ from .gee_plugin import (
     get_precipitation_stats,
     get_ndwi_evi_stats,
     get_population_stats,
+    get_landcover_stats,
+    get_s5p_no2_stats,
+    get_jrc_water_stats,
+    get_modis_lst_stats,
+    get_dynamic_world_stats,
+    get_hansen_forest_stats,
+    get_canopy_height_stats,
 )
 from .osm_plugin import get_osm_vector_data, compute_osm_stats
 
@@ -28,6 +35,13 @@ __all__ = [
     "get_precipitation_stats",
     "get_ndwi_evi_stats",
     "get_population_stats",
+    "get_landcover_stats",
+    "get_s5p_no2_stats",
+    "get_jrc_water_stats",
+    "get_modis_lst_stats",
+    "get_dynamic_world_stats",
+    "get_hansen_forest_stats",
+    "get_canopy_height_stats",
     "get_osm_vector_data",
     "compute_osm_stats",
 ]

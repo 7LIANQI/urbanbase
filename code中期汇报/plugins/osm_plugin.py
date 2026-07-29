@@ -7,38 +7,11 @@ import osmnx as ox
 from utils import make_logger
 
 
-# osmnx 全局代理配置（通过 _config 模块注入）
-_osm_proxies = None
-
-
-def _set_osmnx_proxy(proxies):
-    """设置 osmnx 使用的代理（在调用前配置）。"""
-    global _osm_proxies
-    _osm_proxies = proxies
-    if proxies:
-        # osmnx 底层用 requests，通过配置注入
-        import osmnx._http as ox_http
-        # 注入代理到 osmnx 的 requests 会话
-        ox.settings.requests_kwargs["proxies"] = proxies
-
-
 def get_osm_vector_data(center_lon, center_lat, radius_m, output_dir,
-                        log_callback=None, proxies=None):
-    """获取 OSM 矢量数据（路网、建筑、绿地、水体）。
-
-    Args:
-        proxies: 可选，requests 格式的代理字典。
-                 注意 osmnx 部分 API 调用会使用此代理。
-    """
+                        log_callback=None):
+    """获取 OSM 矢量数据（路网、建筑、绿地、水体）。"""
     log = make_logger(log_callback)
     point = (center_lat, center_lon)
-
-    # 注入代理到 osmnx
-    if proxies:
-        try:
-            ox.settings.requests_kwargs["proxies"] = proxies
-        except Exception:
-            pass  # 旧版 osmnx 可能不支持
 
     # ---- 路网 ----
     try:
@@ -101,14 +74,6 @@ def get_osm_vector_data(center_lon, center_lat, radius_m, output_dir,
         log(f"  获取水体数据失败: {e}")
     except OSError as e:
         log(f"  保存水体数据失败: {e}")
-
-    # 清理代理设置
-    if proxies:
-        try:
-            ox.settings.requests_kwargs.pop("proxies", None)
-        except Exception:
-            pass
-
 
 def compute_osm_stats(output_dir, radius_m, log_callback=None):
     """基于已下载的 OSM GeoJSON 文件计算统计指标。

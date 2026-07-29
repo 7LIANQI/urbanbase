@@ -36,6 +36,12 @@ class ChartWidget(QWidget):
     CHART_ERA5_HOURLY_TEMP = "逐时气温 (ERA5)"
     CHART_ERA5_HOURLY_SOLAR = "逐时太阳辐射 (ERA5)"
     CHART_ERA5_HOURLY_HUMIDITY = "逐时湿度 (ERA5)"
+    # 新增遥感图表
+    CHART_S5P_NO2 = "NO₂ 柱浓度 时间序列 (Sentinel-5P)"
+    CHART_MODIS_LST = "MODIS LST 时间序列 (8天)"
+    CHART_LANDCOVER = "土地覆盖分类 (ESA WorldCover)"
+    CHART_DW = "土地覆盖变化 (Dynamic World)"
+    CHART_FOREST_LOSS = "森林损失 逐年 (Hansen)"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -56,6 +62,8 @@ class ChartWidget(QWidget):
             self.CHART_ERA5_TEMP, self.CHART_ERA5_SOLAR, self.CHART_ERA5_SUN,
             self.CHART_ERA5_HOURLY_TEMP, self.CHART_ERA5_HOURLY_SOLAR,
             self.CHART_ERA5_HOURLY_HUMIDITY,
+            self.CHART_S5P_NO2, self.CHART_MODIS_LST,
+            self.CHART_LANDCOVER, self.CHART_DW, self.CHART_FOREST_LOSS,
         ])
         self.chart_combo.currentTextChanged.connect(self.update_chart)
         control_layout.addWidget(self.chart_combo)
@@ -138,6 +146,19 @@ class ChartWidget(QWidget):
             elif chart_type == self.CHART_ERA5_HOURLY_HUMIDITY:
                 self._plot_hourly(ax, '相对湿度_pct', "逐时湿度 (ERA5)",
                                   "相对湿度 (%)", '#2980b9')
+            # ---- 新增遥感图表 ----
+            elif chart_type == self.CHART_S5P_NO2:
+                self._plot(ax, "s5p_no2_stats.csv", 'Date', 'NO2柱浓度_umol_per_m2',
+                           "对流层 NO₂ 柱浓度 时间序列 (Sentinel-5P)",
+                           "NO₂ (µmol/m²)", '#9b59b6')
+            elif chart_type == self.CHART_MODIS_LST:
+                self._plot_modis_lst(ax)
+            elif chart_type == self.CHART_LANDCOVER:
+                self._plot_landcover_pie(ax)
+            elif chart_type == self.CHART_DW:
+                self._plot_dynamic_world(ax)
+            elif chart_type == self.CHART_FOREST_LOSS:
+                self._plot_forest_loss(ax)
 
             self.figure.tight_layout()
             self._add_cursor(ax)
@@ -280,3 +301,141 @@ class ChartWidget(QWidget):
             )
         except Exception:
             pass
+
+    # ==================== 新增遥感图表方法 ====================
+
+    def _plot_modis_lst(self, ax):
+        """MODIS 8天合成 LST：白天/夜间双线。"""
+        csv_path = Path(self.current_dir) / "modis_lst_stats.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError("modis_lst_stats.csv 不存在")
+
+        df = pd.read_csv(csv_path)
+        n = len(df)
+        kw = {}
+        if n > 60:
+            kw = {'marker': '', 'markersize': 0}
+        elif n > 30:
+            kw = {'marker': '.', 'markersize': 3}
+        else:
+            kw = {'marker': 'o', 'markersize': 5}
+
+        ax.plot(df['Date'], df['白天LST_C'], color='red',
+                linewidth=1.5 if n <= 60 else 1, label='白天 LST', **kw)
+        ax.plot(df['Date'], df['夜间LST_C'], color='blue',
+                linewidth=1.5 if n <= 60 else 1, label='夜间 LST', **kw)
+        ax.set_title("MODIS 地表温度 时间序列 (8天合成)", fontsize=12)
+        ax.set_ylabel("温度 (℃)", fontsize=10)
+        ax.tick_params(axis='x', rotation=45, labelsize=8)
+        ax.tick_params(axis='y', labelsize=8)
+        ax.legend(fontsize=8)
+        ax.grid(True, linestyle='--', alpha=0.7)
+        self._auto_xticks(ax, n)
+
+    def _plot_landcover_pie(self, ax):
+        """ESA WorldCover 土地覆盖饼图。"""
+        csv_path = Path(self.current_dir) / "landcover_stats.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError("landcover_stats.csv 不存在")
+
+        df = pd.read_csv(csv_path)
+        # 排除汇总行
+        df_data = df[df['地物类别'] != '【汇总】'].copy()
+        if df_data.empty:
+            ax.text(0.5, 0.5, "无土地覆盖数据",
+                    ha='center', va='center', transform=ax.transAxes)
+            return
+
+        labels = df_data['地物类别'].tolist()
+        sizes = df_data['占比_pct'].tolist()
+        # 颜色方案（按地物类别匹配）
+        color_map = {
+            "森林": '#006400', "灌木": '#cd853f', "草地": '#b8af4f',
+            "耕地": '#e6c229', "建成区": '#ff0000',
+            "裸地/稀疏植被": '#d2b48c', "雪/冰": '#e8e8e8',
+            "永久水体": '#4169e1', "草本湿地": '#4dbd9b',
+            "红树林": '#00ced1', "苔藓/地衣": '#a9a9a9',
+        }
+        used_colors = [color_map.get(l, '#808080') for l in labels]
+
+        wedges, texts, autotexts = ax.pie(
+            sizes, labels=None, autopct='%1.1f%%',
+            colors=used_colors, startangle=90,
+            pctdistance=0.75,
+        )
+        # 图例：占比 > 2% 才显示
+        threshold = 2.0
+        legend_labels = [
+            f"{l} ({s:.1f}%)" if s >= threshold else "_nolegend_"
+            for l, s in zip(labels, sizes)
+        ]
+        ax.legend(wedges, legend_labels, title="地物类别",
+                  loc="center left", bbox_to_anchor=(1, 0, 0.5, 1),
+                  fontsize=7, title_fontsize=8)
+        ax.set_title("ESA WorldCover 土地覆盖 (2021)", fontsize=12)
+
+    def _plot_dynamic_world(self, ax):
+        """Dynamic World 土地覆盖堆叠面积图。"""
+        csv_path = Path(self.current_dir) / "dw_stats.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError("dw_stats.csv 不存在")
+
+        df = pd.read_csv(csv_path)
+        if df.empty or len(df.columns) < 3:
+            ax.text(0.5, 0.5, "Dynamic World 数据不足",
+                    ha='center', va='center', transform=ax.transAxes)
+            return
+
+        # 获取各类别列
+        class_cols = [c for c in df.columns if c.endswith('_pct') and c != 'Date']
+        if not class_cols:
+            return
+
+        # 对齐时间列
+        x = range(len(df))
+        labels = df['Date'].tolist()
+
+        dw_colors = ['#4169e1', '#006400', '#b8af4f', '#e6c229',
+                     '#4dbd9b', '#cd853f', '#ff0000', '#d2b48c', '#ffffff']
+
+        bottom = None
+        for i, col in enumerate(class_cols):
+            color = dw_colors[i % len(dw_colors)]
+            clean_name = col.replace('_pct', '')
+            ax.fill_between(x, bottom or 0,
+                           (pd.to_numeric(df[col], errors='coerce').fillna(0) if bottom is None
+                            else bottom + pd.to_numeric(df[col], errors='coerce').fillna(0)),
+                           label=clean_name, alpha=0.8, color=color, linewidth=0.5)
+            bottom = (bottom or 0) + pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+        ax.set_title("Dynamic World 土地覆盖变化", fontsize=12)
+        ax.set_ylabel("占比 (%)", fontsize=10)
+        ax.set_xlabel("时间", fontsize=10)
+        n = len(x)
+        step = max(1, n // 8)
+        ax.set_xticks(list(x)[::step])
+        ax.set_xticklabels(labels[::step], rotation=45, fontsize=7)
+        ax.set_ylim(0, 100)
+        ax.legend(fontsize=6, loc='upper right', ncol=2)
+        ax.grid(True, linestyle='--', alpha=0.3)
+
+    def _plot_forest_loss(self, ax):
+        """Hansen 森林逐年损失柱状图。"""
+        csv_path = Path(self.current_dir) / "hansen_loss_by_year.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError("hansen_loss_by_year.csv 不存在（需采集 Hansen 模块）")
+
+        df = pd.read_csv(csv_path)
+        if df.empty:
+            ax.text(0.5, 0.5, "无森林损失数据",
+                    ha='center', va='center', transform=ax.transAxes)
+            return
+
+        ax.bar(df['年份'].astype(str), df['损失面积_km2'],
+               color='#c0392b', alpha=0.8, edgecolor='white', linewidth=0.3)
+        ax.set_title("Hansen 全球森林变化 — 逐年损失面积", fontsize=12)
+        ax.set_ylabel("损失面积 (km²)", fontsize=10)
+        ax.tick_params(axis='x', rotation=45, labelsize=8)
+        ax.tick_params(axis='y', labelsize=8)
+        ax.grid(True, linestyle='--', alpha=0.7, axis='y')
+        self._auto_xticks(ax, len(df))

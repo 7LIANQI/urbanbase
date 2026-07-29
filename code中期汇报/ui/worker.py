@@ -14,8 +14,7 @@ class Worker(QThread):
     step_progress = pyqtSignal(str, int, int)  # (step_name, current, total)
 
     def __init__(self, tasks, map_key, rs_key, gee_key_path,
-                 options, file_logger=None, output_base_dir=None,
-                 proxy_config=None):
+                 options, file_logger=None, output_base_dir=None):
         super().__init__()
         self.tasks = tasks
         self.map_key = map_key
@@ -24,7 +23,6 @@ class Worker(QThread):
         self.options = options       # 细粒度选项 dict
         self._file_logger = file_logger
         self._output_base_dir = output_base_dir
-        self._proxy_config = proxy_config
         self._is_running = True
 
     def _emit_log(self, msg):
@@ -37,7 +35,13 @@ class Worker(QThread):
         output_dirs = []
         total = len(self.tasks)
 
-        for i, (lon, lat, r, sd, ed) in enumerate(self.tasks, 1):
+        for i, task in enumerate(self.tasks, 1):
+            # 支持 5 元组 (lon, lat, r, sd, ed) 和 6 元组 (lon, lat, r, sd, ed, label)
+            if len(task) == 6:
+                lon, lat, r, sd, ed, slice_label = task
+            else:
+                lon, lat, r, sd, ed = task
+                slice_label = None
             if not self._is_running:
                 self.log.emit("🛑 任务被用户中断")
                 break
@@ -62,9 +66,9 @@ class Worker(QThread):
                     gee_key_path=self.gee_key_path,
                     log_callback=self._emit_log,
                     output_base_dir=self._output_base_dir,
-                    proxy_config=self._proxy_config,
                     options=self.options,
                     step_callback=step_callback,
+                    label=slice_label,
                 )
                 output_dirs.append(out_dir)
                 self.result_ready.emit(out_dir)

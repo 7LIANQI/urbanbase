@@ -27,8 +27,6 @@ class OSMCollector(BaseCollector):
         return self.options.get(key, True)
 
     def collect(self):
-        proxies = self.kwargs.get("osm_proxy")
-
         # 检查是否启用了任何 OSM 子模块
         enabled = any(self._opt(k) for k in self.SUB_MODULES) or self._opt("osm_stats")
         if not enabled:
@@ -39,7 +37,6 @@ class OSMCollector(BaseCollector):
         get_osm_vector_data(
             self.lon, self.lat, self.radius, self.output_dir,
             log_callback=self.kwargs.get("log_callback"),
-            proxies=proxies,
         )
 
         files = {}

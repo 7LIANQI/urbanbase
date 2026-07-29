@@ -12,6 +12,13 @@ from plugins.gee_plugin import (
     get_precipitation_stats,
     get_ndwi_evi_stats,
     get_population_stats,
+    get_landcover_stats,
+    get_s5p_no2_stats,
+    get_jrc_water_stats,
+    get_modis_lst_stats,
+    get_dynamic_world_stats,
+    get_hansen_forest_stats,
+    get_canopy_height_stats,
 )
 
 
@@ -32,6 +39,14 @@ class GEECollector(BaseCollector):
         "gee_population":  ("人口", "population_stats.csv"),
         "gee_era5_climate": ("ERA5 气候逐日", "era5_climate_stats.csv"),
         "gee_era5_hourly": ("ERA5 逐时", "era5_hourly.csv"),
+        # ---- 新增遥感模块 ----
+        "gee_landcover":   ("土地覆盖", "landcover_stats.csv"),
+        "gee_s5p_no2":     ("Sentinel-5P NO₂", "s5p_no2_stats.csv"),
+        "gee_jrc_water":   ("JRC 地表水", "jrc_water_stats.csv"),
+        "gee_modis_lst":   ("MODIS LST", "modis_lst_stats.csv"),
+        "gee_dynamic_world": ("Dynamic World", "dw_stats.csv"),
+        "gee_hansen_forest": ("Hansen 森林变化", "hansen_forest_stats.csv"),
+        "gee_canopy_height": ("树冠高度", "canopy_height_stats.csv"),
     }
 
     # 核心遥感指标（合并为一次 GEE 调用的模块）
@@ -54,14 +69,12 @@ class GEECollector(BaseCollector):
             return True
 
         gee_key_path = self.kwargs.get("gee_key_path")
-        proxy_url = self.kwargs.get("gee_proxy")
         log_callback = self.kwargs.get("log_callback")
 
         self.log("初始化 GEE...")
         ok = initialize_gee(
             key_path=gee_key_path,
             log_callback=log_callback,
-            proxy_url=proxy_url,
         )
         if not ok:
             self.log("⚠️ GEE 初始化失败，跳过遥感模块")
@@ -162,7 +175,12 @@ class GEECollector(BaseCollector):
 
             # ---- ERA5 逐时 ----
             if self._opt("gee_era5_hourly"):
-                latest_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+                # 使用用户指定的 end_date；ERA5-Land 有 3-5 天延迟，
+                # 若用户选的 end_date 太新可能无数据，回退到 7 天前
+                if self.end_date:
+                    latest_date = self.end_date
+                else:
+                    latest_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
                 self.log(f"计算 ERA5 逐时数据（{latest_date}）...")
                 get_era5_hourly_stats(
                     roi, latest_date, self.output_dir,
@@ -171,6 +189,77 @@ class GEECollector(BaseCollector):
                 files["era5_hourly"] = self._path("era5_hourly.csv")
             else:
                 self.log("⏭️ ERA5 逐时已禁用")
+
+            # ==== 新增遥感模块 ====
+
+            # ---- 土地覆盖 (ESA WorldCover) ----
+            if self._opt("gee_landcover"):
+                self.log("获取 ESA WorldCover 土地覆盖数据...")
+                get_landcover_stats(roi, self.output_dir, log_callback=log_cb)
+                files["landcover_stats"] = self._path("landcover_stats.csv")
+            else:
+                self.log("⏭️ 土地覆盖已禁用")
+
+            # ---- Sentinel-5P NO₂ ----
+            if self._opt("gee_s5p_no2"):
+                self.log("获取 Sentinel-5P 对流层 NO₂ 数据...")
+                get_s5p_no2_stats(
+                    roi, self.start_date, self.end_date, self.output_dir,
+                    log_callback=log_cb,
+                )
+                files["s5p_no2_stats"] = self._path("s5p_no2_stats.csv")
+            else:
+                self.log("⏭️ Sentinel-5P NO₂ 已禁用")
+
+            # ---- JRC 地表水 ----
+            if self._opt("gee_jrc_water"):
+                self.log("获取 JRC 全球地表水数据...")
+                get_jrc_water_stats(roi, self.output_dir, log_callback=log_cb)
+                files["jrc_water_stats"] = self._path("jrc_water_stats.csv")
+            else:
+                self.log("⏭️ JRC 地表水已禁用")
+
+            # ---- MODIS LST ----
+            if self._opt("gee_modis_lst"):
+                self.log("获取 MODIS 8天 LST 数据...")
+                get_modis_lst_stats(
+                    roi, self.start_date, self.end_date, self.output_dir,
+                    log_callback=log_cb,
+                )
+                files["modis_lst_stats"] = self._path("modis_lst_stats.csv")
+            else:
+                self.log("⏭️ MODIS LST 已禁用")
+
+            # ---- Dynamic World ----
+            if self._opt("gee_dynamic_world"):
+                self.log("获取 Dynamic World 土地覆盖数据...")
+                get_dynamic_world_stats(
+                    roi, self.start_date, self.end_date, self.output_dir,
+                    log_callback=log_cb,
+                )
+                files["dw_stats"] = self._path("dw_stats.csv")
+            else:
+                self.log("⏭️ Dynamic World 已禁用")
+
+            # ---- Hansen 森林变化 ----
+            if self._opt("gee_hansen_forest"):
+                self.log("获取 Hansen 森林变化数据...")
+                get_hansen_forest_stats(roi, self.output_dir, log_callback=log_cb)
+                files["hansen_forest_stats"] = self._path("hansen_forest_stats.csv")
+                # 逐年损失数据（额外产出）
+                loss_year_path = self._path("hansen_loss_by_year.csv")
+                if os.path.exists(loss_year_path):
+                    files["hansen_loss_by_year"] = loss_year_path
+            else:
+                self.log("⏭️ Hansen 森林变化已禁用")
+
+            # ---- 树冠高度 ----
+            if self._opt("gee_canopy_height"):
+                self.log("获取 ETH 全球树冠高度数据...")
+                get_canopy_height_stats(roi, self.output_dir, log_callback=log_cb)
+                files["canopy_height_stats"] = self._path("canopy_height_stats.csv")
+            else:
+                self.log("⏭️ 树冠高度已禁用")
 
         except Exception as e:
             self.log(f"⚠️ GEE 数据处理失败: {e}")

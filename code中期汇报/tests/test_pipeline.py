@@ -4,7 +4,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pipeline import _opt, _any_gee, _any_osm, _resolve_proxies
+from pipeline import _opt, _any_gee, _any_osm
 
 # 完整默认选项
 FULL = {
@@ -13,6 +13,10 @@ FULL = {
     "gee_elevation": True, "gee_precipitation": True,
     "gee_ndwi": True, "gee_evi": True, "gee_population": True,
     "gee_era5_climate": True, "gee_era5_hourly": True,
+    "gee_landcover": True, "gee_s5p_no2": True,
+    "gee_jrc_water": True, "gee_modis_lst": True,
+    "gee_dynamic_world": True, "gee_hansen_forest": True,
+    "gee_canopy_height": True,
     "osm_roads": True, "osm_buildings": True,
     "osm_green_spaces": True, "osm_water_bodies": True,
     "osm_stats": True,
@@ -79,37 +83,3 @@ class TestAnyOsm:
 
     def test_none_options(self):
         assert _any_osm(None) is True
-
-
-class TestResolveProxies:
-    """测试 _resolve_proxies 函数。"""
-
-    def test_no_proxy_config(self):
-        result = _resolve_proxies(None)
-        assert result["air_proxy"] is None
-        assert result["street_proxy"] is None
-        assert result["gee_proxy"] is None
-        assert result["osm_proxy"] is None
-
-    def test_full_proxy(self):
-        config = {
-            "url": "http://127.0.0.1:7890",
-            "air": True, "street": True, "gee": True, "osm": True,
-        }
-        result = _resolve_proxies(config)
-        assert result["air_proxy"] == {"http": "http://127.0.0.1:7890",
-                                       "https": "http://127.0.0.1:7890"}
-        assert result["street_proxy"] is not None
-        assert result["gee_proxy"] == "http://127.0.0.1:7890"
-        assert result["osm_proxy"] is not None
-
-    def test_street_direct(self):
-        """百度街景默认直连（不走代理）。"""
-        config = {"url": "http://127.0.0.1:7890"}
-        result = _resolve_proxies(config)
-        # 默认：street=False
-        assert result["street_proxy"] is None
-        # 默认：air/gee/osm=True
-        assert result["air_proxy"] is not None
-        assert result["gee_proxy"] is not None
-        assert result["osm_proxy"] is not None

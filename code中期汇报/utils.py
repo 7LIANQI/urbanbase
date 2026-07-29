@@ -125,12 +125,23 @@ def retry_on_network_error(max_retries=3, base_delay=1.0, backoff=2.0):
 def _get_machine_salt():
     """获取机器相关的盐值（用于密钥混淆）。
 
+    使用计算机名 + 用户名 + 固定应用密钥组合，确保同一台机器上每次
+    启动 Python 都能得到相同的盐值。
+    不再使用 uuid.getnode()——在某些 Windows 系统上它可能返回随机值。
+
     注意：这是混淆（obfuscation）而非加密（encryption）。
     任何有权限读取本机文件的人都可以逆向出原始密钥。
     如需真正的安全存储，请使用 Windows 凭据管理器或 keyring 库。
     """
-    import uuid
-    return str(uuid.getnode())
+    import hashlib
+    import os as _os
+    parts = [
+        _os.environ.get("COMPUTERNAME", ""),
+        _os.environ.get("USERNAME", ""),
+        "UrbanAnalysisApp.FixedSalt.2026",  # 固定应用密钥
+    ]
+    combined = "|".join(parts)
+    return hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
 
 def obfuscate(text):

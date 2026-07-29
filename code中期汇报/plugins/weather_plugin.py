@@ -13,7 +13,7 @@ OPENWEATHER_WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
 
 
 @retry_on_network_error(max_retries=2, base_delay=0.5)
-def _fetch_weather(lon, lat, api_key, proxies):
+def _fetch_weather(lon, lat, api_key):
     """实际发起天气 API 请求（带重试）。"""
     return requests.get(
         OPENWEATHER_WEATHER_URL,
@@ -23,15 +23,12 @@ def _fetch_weather(lon, lat, api_key, proxies):
             "units": "metric",   # 摄氏度
             "lang": "zh_cn",     # 中文天气描述
         },
-        timeout=10, proxies=proxies,
+        timeout=10,
     )
 
 
-def get_weather_by_lonlat(lon, lat, api_key, log_callback=None, proxies=None):
+def get_weather_by_lonlat(lon, lat, api_key, log_callback=None):
     """获取实时天气数据（气温、湿度、气压、风速、云量等）。
-
-    Args:
-        proxies: 可选，requests 格式的代理字典。
 
     Returns:
         dict 或 None: {
@@ -51,7 +48,7 @@ def get_weather_by_lonlat(lon, lat, api_key, log_callback=None, proxies=None):
     log = make_logger(log_callback)
 
     try:
-        resp = _fetch_weather(lon, lat, api_key, proxies)
+        resp = _fetch_weather(lon, lat, api_key)
         if resp.status_code == 200:
             data = resp.json()
             return {

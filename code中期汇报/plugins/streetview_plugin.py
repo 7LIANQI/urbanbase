@@ -229,21 +229,21 @@ def _download_directional(panoid, heading, save_path, log):
 # ============================================================
 
 def get_streetview_metadata(lon, lat, ak, log_callback=None, *,
-                            coordtype="wgs84ll", proxies=None):
+                            coordtype="wgs84ll"):
     """探测指定坐标是否有百度街景覆盖。
 
     Returns:
-        (has_view, date_str): has_view 为 bool，date_str 为拍摄日期字符串（如 "202211"）或 None。
-        旧版调用者若只取 bool 值: `has_view = get_streetview_metadata(...)` 仍然兼容。
+        (has_view, date_str, panoid): has_view 为 bool，date_str 为拍摄日期（如 "202211"），
+        panoid 为全景 ID 字符串。旧版调用者若只取前两个值仍然兼容。
     """
     log = make_logger(log_callback)
     panoid, date_str = _find_panoid(lon, lat, ak, log)
-    return (panoid is not None, date_str)
+    return (panoid is not None, date_str, panoid)
 
 
 def download_streetview_image(lon, lat, heading, pitch, ak, save_path,
                               log_callback=None, *,
-                              coordtype="wgs84ll", proxies=None):
+                              coordtype="wgs84ll"):
     """下载指定方向的百度街景图片。"""
     log = make_logger(log_callback)
     panoid, date_str = _find_panoid(lon, lat, ak, log)

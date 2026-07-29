@@ -12,7 +12,6 @@ class WeatherCollector(BaseCollector):
 
     def collect(self):
         api_key = self.kwargs.get("openweather_key", "")
-        proxies = self.kwargs.get("air_proxy")
 
         if not api_key:
             self.log("⚠️ 未提供 OpenWeatherMap Key，跳过天气")
@@ -22,7 +21,6 @@ class WeatherCollector(BaseCollector):
         data = get_weather_by_lonlat(
             self.lon, self.lat, api_key,
             log_callback=self.kwargs.get("log_callback"),
-            proxies=proxies,
         )
         if data:
             path = self._path("weather.json")

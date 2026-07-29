@@ -2,11 +2,7 @@
 """Google Earth Engine 遥感数据插件：夜光、NDVI、地表温度。
 
 GEE 使用 google-auth / google-api-core 发起请求，不直接通过 requests。
-要让 GEE 走代理，你需要在系统层级配置代理（环境变量或 VPN 全局模式）：
-  - HTTP_PROXY / HTTPS_PROXY 环境变量
-  - 或在 Clash/V2Ray 中设置 TUN 模式让 googleapis.com 走代理
-
-本模块在初始化 GEE 前会尝试应用环境变量中的代理设置。
+如需代理，请在系统层级配置（环境变量 HTTP_PROXY/HTTPS_PROXY 或 VPN 全局模式）。
 """
 import os
 import json
@@ -19,20 +15,9 @@ from utils import make_logger
 from config import LST_SCALE, LST_OFFSET, LST_KELVIN
 
 
-def initialize_gee(key_path=None, log_callback=None, proxy_url=None):
-    """初始化 Google Earth Engine。
-
-    Args:
-        proxy_url: 可选，代理 URL（如 http://127.0.0.1:7890）。
-                   会设置 HTTP_PROXY/HTTPS_PROXY 环境变量。
-    """
+def initialize_gee(key_path=None, log_callback=None):
+    """初始化 Google Earth Engine。"""
     log = make_logger(log_callback)
-
-    # 如果指定了代理，设置环境变量（GEE 底层库会读取）
-    if proxy_url:
-        os.environ.setdefault("HTTP_PROXY", proxy_url)
-        os.environ.setdefault("HTTPS_PROXY", proxy_url)
-        log(f"🔗 GEE 使用代理: {proxy_url}")
 
     try:
         if key_path and os.path.exists(key_path):
@@ -743,3 +728,534 @@ def _try_gpw(roi_geometry, area_sq_km, log):
     except Exception as e:
         log(f"    GPW 处理出错: {e}")
         return None
+
+
+# ===================== P0: 土地覆盖 / 大气污染 / 地表水 =====================
+
+# ESA WorldCover 地物类别映射
+_LANDCOVER_CLASSES = {
+    10: "森林",
+    20: "灌木",
+    30: "草地",
+    40: "耕地",
+    50: "建成区",
+    60: "裸地/稀疏植被",
+    70: "雪/冰",
+    80: "永久水体",
+    90: "草本湿地",
+    95: "红树林",
+    100: "苔藓/地衣",
+}
+
+
+def get_landcover_stats(roi_geometry, output_dir, log_callback=None):
+    """获取 ESA WorldCover 土地覆盖分类（2021 年，10m 分辨率）。
+
+    数据集: ESA/WorldCover/v200
+    输出: landcover_stats.csv —— 各地类面积与占比
+    """
+    log = make_logger(log_callback)
+    log("  获取 ESA WorldCover 土地覆盖数据...")
+
+    try:
+        wc = ee.ImageCollection("ESA/WorldCover/v200").first()
+        # 使用 connectedPixelCount 获取各类别像元数
+        # 方法：对每个类别构建二值图 → reduceRegion sum
+        landcover_img = wc.select('Map')
+
+        # 使用 frequencyHistogram 一次性获取各类别像元计数
+        hist = landcover_img.reduceRegion(
+            reducer=ee.Reducer.frequencyHistogram(),
+            geometry=roi_geometry,
+            scale=10,
+            maxPixels=1e9,
+        ).getInfo()
+
+        hist_data = hist.get('Map', {})
+        if not hist_data:
+            log("  WorldCover 无数据，跳过")
+            return
+
+        # 计算像元面积（10m × 10m = 100 m²）
+        pixel_area_m2 = 100.0
+        total_pixels = sum(int(v) for v in hist_data.values())
+        total_area_m2 = total_pixels * pixel_area_m2
+
+        records = []
+        for class_id_str, count_str in sorted(hist_data.items(),
+                                               key=lambda x: int(x[1]), reverse=True):
+            class_id = int(class_id_str)
+            pixel_count = int(count_str)
+            area_m2 = pixel_count * pixel_area_m2
+            pct = (pixel_count / total_pixels * 100) if total_pixels > 0 else 0
+            label = _LANDCOVER_CLASSES.get(class_id, f"类别{class_id}")
+            records.append({
+                "类别代码": class_id,
+                "地物类别": label,
+                "像元数": pixel_count,
+                "面积_m2": round(area_m2, 1),
+                "面积_km2": round(area_m2 / 1e6, 4),
+                "占比_pct": round(pct, 2),
+            })
+
+        if records:
+            # 计算汇总指标
+            built_pct = sum(r["占比_pct"] for r in records if r["类别代码"] == 50)
+            water_pct = sum(r["占比_pct"] for r in records if r["类别代码"] == 80)
+            green_pct = sum(r["占比_pct"] for r in records
+                           if r["类别代码"] in (10, 20, 30, 90, 95, 100))
+            impervious_pct = built_pct  # 建成区近似不透水面
+
+            summary = {
+                "类别代码": "",
+                "地物类别": "【汇总】",
+                "像元数": total_pixels,
+                "面积_m2": round(total_area_m2, 1),
+                "面积_km2": round(total_area_m2 / 1e6, 4),
+                "占比_pct": 100.0,
+            }
+            records.append(summary)
+
+            df = pd.DataFrame(records)
+            df.to_csv(os.path.join(output_dir, "landcover_stats.csv"), index=False)
+            log(f"  土地覆盖数据已保存（{len(records) - 1} 类, "
+                f"建成区 {built_pct:.1f}%, 绿地 {green_pct:.1f}%, 水体 {water_pct:.1f}%）")
+        else:
+            log("  土地覆盖数据为空，跳过")
+    except Exception as e:
+        log(f"  土地覆盖数据处理出错: {e}")
+
+
+def get_s5p_no2_stats(roi_geometry, start_date, end_date, output_dir,
+                      log_callback=None):
+    """获取 Sentinel-5P 对流层 NO₂ 柱浓度时间序列。
+
+    数据集: COPERNICUS/S5P/OFFL/L3_NO2 (约 1113m 分辨率, 2018.7+)
+    Harp 格式三级产品，已去除云/雪像素。
+    输出: s5p_no2_stats.csv —— 逐日 NO₂ 柱浓度统计
+    """
+    log = make_logger(log_callback)
+    log("  获取 Sentinel-5P NO₂ 数据...")
+
+    try:
+        s5p = (
+            ee.ImageCollection("COPERNICUS/S5P/OFFL/L3_NO2")
+            .filterBounds(roi_geometry)
+            .filterDate(start_date, end_date)
+            .select('tropospheric_NO2_column_number_density')
+        )
+
+        def calc_no2(img):
+            stats = img.reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=roi_geometry,
+                scale=1113,
+                maxPixels=1e9,
+            )
+            return ee.Feature(None, stats).set({
+                'Date': img.date().format('YYYY-MM-dd'),
+            })
+
+        feats = s5p.map(calc_no2).getInfo()
+        records = [
+            f['properties'] for f in feats.get('features', [])
+            if f.get('properties', {}).get('tropospheric_NO2_column_number_density') is not None
+        ]
+
+        if records:
+            df = pd.DataFrame(records)
+            df = df[['Date', 'tropospheric_NO2_column_number_density']]
+            # 单位转换：mol/m² → µmol/m²（乘以 1e6）
+            df['NO2柱浓度_umol_per_m2'] = (
+                df['tropospheric_NO2_column_number_density'] * 1e6
+            ).round(2)
+            df = df[['Date', 'NO2柱浓度_umol_per_m2']]
+            df.to_csv(os.path.join(output_dir, "s5p_no2_stats.csv"), index=False)
+            log(f"  对流层 NO₂ 数据已保存（{len(df)} 天）")
+        else:
+            log("  该区域/时间段无 Sentinel-5P NO₂ 数据（可能因为云覆盖或 2018.7 前）")
+    except Exception as e:
+        log(f"  Sentinel-5P NO₂ 处理出错: {e}")
+
+
+def get_jrc_water_stats(roi_geometry, output_dir, log_callback=None):
+    """获取 JRC 全球地表水数据（1984-2021 年长期统计）。
+
+    数据集: JRC/GSW1_4/GlobalSurfaceWater (30m 分辨率)
+    波段:
+      - occurrence: 水体出现频率（0-100%）
+      - seasonality: 季节性变化（0-12 个月）
+      - recurrence: 年度重现频率
+      - max_extent: 最大水域范围
+    输出: jrc_water_stats.csv —— 水体统计汇总
+    """
+    log = make_logger(log_callback)
+    log("  获取 JRC 全球地表水数据...")
+
+    try:
+        gsw = ee.Image("JRC/GSW1_4/GlobalSurfaceWater")
+
+        bands = ['occurrence', 'seasonality', 'recurrence', 'max_extent']
+        stats_reducer = (
+            ee.Reducer.mean()
+            .combine(ee.Reducer.median(), sharedInputs=True)
+            .combine(ee.Reducer.minMax(), sharedInputs=True)
+        )
+
+        stats = gsw.select(bands).reduceRegion(
+            reducer=stats_reducer,
+            geometry=roi_geometry,
+            scale=30,
+            maxPixels=1e9,
+        ).getInfo()
+
+        if not stats:
+            log("  JRC 地表水数据为空，跳过")
+            return
+
+        # 计算水体面积（occurrence > 50% 的区域）
+        water_mask = gsw.select('occurrence').gt(50)
+        water_area_stats = water_mask.multiply(ee.Image.pixelArea()).reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=roi_geometry,
+            scale=30,
+            maxPixels=1e9,
+        ).getInfo()
+
+        # 计算季节性水体面积（seasonality > 6 的区域）
+        seasonal_mask = gsw.select('seasonality').gt(6)
+        seasonal_area_stats = seasonal_mask.multiply(ee.Image.pixelArea()).reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=roi_geometry,
+            scale=30,
+            maxPixels=1e9,
+        ).getInfo()
+
+        water_area_m2 = water_area_stats.get('occurrence_sum', 0) or 0
+        seasonal_area_m2 = seasonal_area_stats.get('seasonality_sum', 0) or 0
+
+        record = {
+            "水体出现频率均值_pct": round(stats.get('occurrence_mean', 0), 1),
+            "水体出现频率中位数_pct": round(stats.get('occurrence_median', 0), 1),
+            "季节性均值_月": round(stats.get('seasonality_mean', 0), 2),
+            "常年水体面积_km2": round(water_area_m2 / 1e6, 4),
+            "季节性水体面积_km2": round(seasonal_area_m2 / 1e6, 4),
+            "最大水域范围占比_pct": round(stats.get('max_extent_mean', 0) * 100, 1),
+            "年际重现频率均值_pct": round(stats.get('recurrence_mean', 0), 1),
+        }
+
+        df = pd.DataFrame([record])
+        df.to_csv(os.path.join(output_dir, "jrc_water_stats.csv"), index=False)
+        log(f"  JRC 地表水数据已保存（常年水体 {record['常年水体面积_km2']:.3f} km²）")
+    except Exception as e:
+        log(f"  JRC 地表水处理出错: {e}")
+
+
+# ===================== P1: MODIS LST / Dynamic World =====================
+
+def get_modis_lst_stats(roi_geometry, start_date, end_date, output_dir,
+                        log_callback=None):
+    """获取 MODIS MOD11A2 8天合成地表温度时间序列（Landsat LST 补充）。
+
+    数据集: MODIS/061/MOD11A2 (1km 分辨率, 8天合成)
+    波段: LST_Day_1km, LST_Night_1km
+    缩放: 值 × 0.02 → Kelvin, Kelvin - 273.15 → Celsius
+    输出: modis_lst_stats.csv —— 每 8 天白天/夜间 LST
+    """
+    log = make_logger(log_callback)
+    log("  获取 MODIS 8天 LST 数据...")
+
+    try:
+        modis = (
+            ee.ImageCollection("MODIS/061/MOD11A2")
+            .filterBounds(roi_geometry)
+            .filterDate(start_date, end_date)
+            .select(['LST_Day_1km', 'LST_Night_1km'])
+        )
+
+        def calc_modis_lst(img):
+            # MODIS LST: scale 0.02 → Kelvin
+            day_c = img.select('LST_Day_1km').multiply(0.02).subtract(273.15).rename('day_c')
+            night_c = img.select('LST_Night_1km').multiply(0.02).subtract(273.15).rename('night_c')
+            img_with_c = img.addBands([day_c, night_c])
+            stats = img_with_c.select(['day_c', 'night_c']).reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=roi_geometry,
+                scale=1000,
+                maxPixels=1e9,
+            )
+            return ee.Feature(None, stats).set({
+                'Date': img.date().format('YYYY-MM-dd'),
+            })
+
+        feats = modis.map(calc_modis_lst).getInfo()
+        records = [
+            f['properties'] for f in feats.get('features', [])
+            if f.get('properties', {}).get('day_c') is not None
+        ]
+
+        if records:
+            df = pd.DataFrame(records)
+            df = df[['Date', 'day_c', 'night_c']]
+            df.columns = ['Date', '白天LST_C', '夜间LST_C']
+            df['白天LST_C'] = df['白天LST_C'].round(1)
+            df['夜间LST_C'] = df['夜间LST_C'].round(1)
+            df.to_csv(os.path.join(output_dir, "modis_lst_stats.csv"), index=False)
+            log(f"  MODIS LST 数据已保存（{len(df)} 个8天周期）")
+        else:
+            log("  MODIS LST 无数据，跳过")
+    except Exception as e:
+        log(f"  MODIS LST 处理出错: {e}")
+
+
+# Dynamic World 类别映射
+_DW_CLASSES = {
+    0: "水域",
+    1: "森林",
+    2: "草地",
+    3: "耕地",
+    4: "湿地",
+    5: "灌木",
+    6: "建成区",
+    7: "裸地",
+    8: "雪/冰",
+}
+
+
+def get_dynamic_world_stats(roi_geometry, start_date, end_date, output_dir,
+                            log_callback=None):
+    """获取 Dynamic World 近实时土地覆盖时间序列。
+
+    数据集: GOOGLE/DYNAMICWORLD/V1 (10m, Sentinel-2 近实时, 2020.6+)
+    波段: label (最可能类别) + 各类别概率
+    输出: dw_stats.csv —— 各时期主要地类面积占比
+    """
+    log = make_logger(log_callback)
+    log("  获取 Dynamic World 土地覆盖数据...")
+
+    try:
+        dw = (
+            ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
+            .filterBounds(roi_geometry)
+            .filterDate(start_date, end_date)
+            .select('label')
+        )
+
+        def calc_dw(img):
+            # 获取各类别直方图
+            hist = img.reduceRegion(
+                reducer=ee.Reducer.frequencyHistogram(),
+                geometry=roi_geometry,
+                scale=10,
+                maxPixels=1e9,
+            )
+            return ee.Feature(None, hist).set({
+                'Date': img.date().format('YYYY-MM-dd'),
+            })
+
+        feats = dw.map(calc_dw).getInfo()
+        feature_list = feats.get('features', [])
+        if not feature_list:
+            log("  Dynamic World 无数据，跳过")
+            return
+
+        records = []
+        for feat in feature_list:
+            props = feat.get('properties', {})
+            date_str = props.get('Date', '')
+            label_hist = props.get('label', {})
+            if not label_hist:
+                continue
+
+            total = sum(int(v) for v in label_hist.values())
+            if total == 0:
+                continue
+
+            row = {'Date': date_str}
+            for class_id_str, count_str in label_hist.items():
+                class_id = int(class_id_str)
+                class_name = _DW_CLASSES.get(class_id, f"类别{class_id}")
+                pct = int(count_str) / total * 100
+                row[f"{class_name}_pct"] = round(pct, 2)
+            records.append(row)
+
+        if records:
+            df = pd.DataFrame(records)
+            # 确保 Date 在第一列
+            cols = ['Date'] + [c for c in df.columns if c != 'Date']
+            df = df[cols]
+            df.to_csv(os.path.join(output_dir, "dw_stats.csv"), index=False)
+            log(f"  Dynamic World 数据已保存（{len(df)} 期）")
+        else:
+            log("  Dynamic World 无有效数据，跳过")
+    except Exception as e:
+        log(f"  Dynamic World 处理出错: {e}")
+
+
+# ===================== P2: 森林变化 / 树冠高度 =====================
+
+def get_hansen_forest_stats(roi_geometry, output_dir, log_callback=None):
+    """获取 Hansen 全球森林变化数据（2000-2023 年）。
+
+    数据集: UMD/hansen/global_forest_change_2023_v1_11 (30m)
+    波段:
+      - treecover2000: 2000 年树木覆盖率（0-100%）
+      - loss: 期间损失（1=损失, 0=未损失）
+      - gain: 期间增长（1=增长, 0=非增长, 2000-2012）
+      - lossyear: 损失年份（0=未损失, 1-23=2001-2023）
+    输出: hansen_forest_stats.csv —— 森林变化汇总
+    """
+    log = make_logger(log_callback)
+    log("  获取 Hansen 全球森林变化数据...")
+
+    try:
+        gfc = ee.Image("UMD/hansen/global_forest_change_2023_v1_11")
+
+        # 树冠覆盖率统计
+        cover_stats = gfc.select('treecover2000').reduceRegion(
+            reducer=ee.Reducer.mean().combine(
+                ee.Reducer.median(), sharedInputs=True
+            ).combine(ee.Reducer.minMax(), sharedInputs=True),
+            geometry=roi_geometry,
+            scale=30,
+            maxPixels=1e9,
+        ).getInfo()
+
+        # 损失面积（loss=1）
+        loss_area = gfc.select('loss').multiply(
+            ee.Image.pixelArea()
+        ).reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=roi_geometry,
+            scale=30,
+            maxPixels=1e9,
+        ).getInfo()
+
+        # 增长面积（gain=1）
+        gain_area = gfc.select('gain').multiply(
+            ee.Image.pixelArea()
+        ).reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=roi_geometry,
+            scale=30,
+            maxPixels=1e9,
+        ).getInfo()
+
+        # 按年份统计损失
+        loss_area_m2 = loss_area.get('loss_sum', 0) or 0
+        gain_area_m2 = gain_area.get('gain_sum', 0) or 0
+
+        # 逐年损失统计
+        yearly_records = []
+        for year_offset in range(1, 24):  # 2001-2023
+            year_img = gfc.select('lossyear').eq(year_offset)
+            year_loss = year_img.multiply(ee.Image.pixelArea()).reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=roi_geometry,
+                scale=30,
+                maxPixels=1e9,
+            ).getInfo()
+            loss_val = year_loss.get('lossyear_sum', 0) or 0
+            if loss_val > 0:
+                yearly_records.append({
+                    "年份": 2000 + year_offset,
+                    "损失面积_km2": round(loss_val / 1e6, 4),
+                })
+
+        record = {
+            "2000年树冠覆盖率均值_pct": round(cover_stats.get('treecover2000_mean', 0), 1),
+            "2000年树冠覆盖率中位数_pct": round(cover_stats.get('treecover2000_median', 0), 1),
+            "2000年树冠覆盖率最大值_pct": round(cover_stats.get('treecover2000_max', 0), 1),
+            "2000-2023损失总面积_km2": round(loss_area_m2 / 1e6, 4),
+            "2000-2012增长总面积_km2": round(gain_area_m2 / 1e6, 4),
+            "净变化_km2": round((gain_area_m2 - loss_area_m2) / 1e6, 4),
+        }
+
+        df = pd.DataFrame([record])
+        df.to_csv(os.path.join(output_dir, "hansen_forest_stats.csv"), index=False)
+
+        # 逐年损失单独保存
+        if yearly_records:
+            yearly_df = pd.DataFrame(yearly_records)
+            yearly_df.to_csv(
+                os.path.join(output_dir, "hansen_loss_by_year.csv"), index=False
+            )
+
+        log(f"  森林变化数据已保存（树冠覆盖 {record['2000年树冠覆盖率均值_pct']:.1f}%, "
+            f"损失 {record['2000-2023损失总面积_km2']:.3f} km²）")
+    except Exception as e:
+        log(f"  Hansen 森林变化处理出错: {e}")
+
+
+def get_canopy_height_stats(roi_geometry, output_dir, log_callback=None):
+    """获取 ETH 全球树冠高度数据（2020 年，10m 分辨率）。
+
+    数据集: projects/meta-forest-monitoring-okw37/assets/ETH_Global_Canopy_Height_2020
+    波段: height (单位: 米, 仅树木覆盖区域有值, 其他为 0)
+    输出: canopy_height_stats.csv —— 树冠高度统计
+    """
+    log = make_logger(log_callback)
+    log("  获取 ETH 全球树冠高度数据...")
+
+    try:
+        ch = ee.Image(
+            "projects/meta-forest-monitoring-okw37/assets/ETH_Global_Canopy_Height_2020"
+        )
+
+        # 全区域统计（含 0 值 —— 非树木区域）
+        ch_reducer = (
+            ee.Reducer.mean()
+            .combine(ee.Reducer.median(), sharedInputs=True)
+            .combine(ee.Reducer.minMax(), sharedInputs=True)
+            .combine(ee.Reducer.sampleStdDev(), sharedInputs=True)
+        )
+        stats = ch.select('height').reduceRegion(
+            reducer=ch_reducer,
+            geometry=roi_geometry,
+            scale=10,
+            maxPixels=1e9,
+        ).getInfo()
+
+        # 仅树木区域统计（>2m）
+        canopy_mask = ch.select('height').gt(2)
+        canopy_stats = ch.select('height').updateMask(canopy_mask).reduceRegion(
+            reducer=ch_reducer,
+            geometry=roi_geometry,
+            scale=10,
+            maxPixels=1e9,
+        ).getInfo()
+
+        # 树木覆盖率（高度 > 2m 的像元占比）
+        canopy_pixels = canopy_mask.multiply(ee.Image.pixelArea()).reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=roi_geometry,
+            scale=10,
+            maxPixels=1e9,
+        ).getInfo()
+
+        # ROI 总面积
+        total_area_m2 = roi_geometry.area(1).getInfo()
+        total_area_ha = total_area_m2 / 10000 if total_area_m2 else 1.0
+        canopy_area_m2 = canopy_pixels.get('height_sum', 0) or 0
+        canopy_area_ha = canopy_area_m2 / 10000
+
+        record = {
+            "树冠高度均值_m": round(stats.get('height_mean', 0), 1),
+            "树冠高度中位数_m": round(stats.get('height_median', 0), 1),
+            "树冠高度最大值_m": round(stats.get('height_max', 0), 1),
+            "树冠高度标准差_m": round(stats.get('height_stdDev', 0), 1),
+            "树木区域平均树高_m": round(canopy_stats.get('height_mean', 0), 1),
+            "树木区域最大树高_m": round(canopy_stats.get('height_max', 0), 1),
+            "树冠覆盖率_pct": round(canopy_area_ha / total_area_ha * 100, 2) if total_area_ha > 0 else 0,
+            "树冠面积_ha": round(canopy_area_ha, 2),
+        }
+
+        df = pd.DataFrame([record])
+        df.to_csv(os.path.join(output_dir, "canopy_height_stats.csv"), index=False)
+        log(f"  树冠高度数据已保存（树木区域平均树高 {record['树木区域平均树高_m']:.1f} m, "
+            f"树冠覆盖率 {record['树冠覆盖率_pct']:.1f}%）")
+    except Exception as e:
+        log(f"  树冠高度处理出错: {e}")
+        # ETH Canopy Height 是社区数据集，可能因权限拒绝访问
+        if "Permission" in str(e) or "403" in str(e) or "denied" in str(e).lower():
+            log("    ⚠️ ETH 树冠高度数据集可能需要额外授权（非 GEE 官方数据集）")

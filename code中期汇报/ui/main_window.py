@@ -13,9 +13,9 @@ from PyQt6.QtWidgets import (
     QHeaderView, QPushButton, QProgressBar,
     QTabWidget, QTextEdit, QListWidget, QListWidgetItem,
     QFileDialog, QMessageBox, QGridLayout,
-    QScrollArea, QFrame, QMenu, QComboBox,
+    QScrollArea, QFrame, QMenu, QComboBox, QInputDialog, QTimeEdit,
 )
-from PyQt6.QtCore import Qt, QSettings, QUrl, QPoint
+from PyQt6.QtCore import Qt, QSettings, QUrl, QPoint, QTimer, QTime
 from PyQt6.QtGui import QDesktopServices, QAction
 from PyQt6.QtWidgets import QMenu
 
@@ -172,18 +172,35 @@ class MainWindow(QWidget):
 
     def _build_left_panel(self):
         panel = QWidget()
-        panel.setFixedWidth(260)
+        panel.setFixedWidth(280)
         layout = QVBoxLayout(panel)
 
         label = QLabel("📜 历史记录")
         label.setStyleSheet("font-size: 16px; font-weight: bold;")
         layout.addWidget(label)
 
+        # ---- 筛选控件 ----
+        filter_row = QHBoxLayout()
+        self.history_filter_combo = QComboBox()
+        self.history_filter_combo.addItems([
+            "全部记录", "最近 7 天", "最近 30 天", "最近 90 天", "本年",
+        ])
+        self.history_filter_combo.setToolTip("按时间筛选历史记录")
+        self.history_filter_combo.currentIndexChanged.connect(self._load_history)
+        filter_row.addWidget(self.history_filter_combo)
+        layout.addLayout(filter_row)
+
         self.history_list = QListWidget()
         self.history_list.itemClicked.connect(self._on_history_clicked)
         self.history_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.history_list.customContextMenuRequested.connect(self._on_history_context_menu)
         layout.addWidget(self.history_list)
+
+        # 缓存统计
+        self.cache_stats_label = QLabel("")
+        self.cache_stats_label.setStyleSheet("color: #888; font-size: 10px; padding: 2px;")
+        self.cache_stats_label.setWordWrap(True)
+        layout.addWidget(self.cache_stats_label)
 
         # 对比模式
         compare_row = QHBoxLayout()
@@ -195,9 +212,16 @@ class MainWindow(QWidget):
         compare_row.addWidget(compare_btn)
         layout.addLayout(compare_row)
 
-        clean_btn = QPushButton("🗑️ 清理数据...")
+        # 操作按钮行
+        btn_row2 = QHBoxLayout()
+        timeline_btn = QPushButton("📊 时间线")
+        timeline_btn.setToolTip("查看同一位置的所有历史数据时间线")
+        timeline_btn.clicked.connect(self._show_timeline_view)
+        btn_row2.addWidget(timeline_btn)
+        clean_btn = QPushButton("🗑️ 清理")
         clean_btn.clicked.connect(self._clean_data_dialog)
-        layout.addWidget(clean_btn)
+        btn_row2.addWidget(clean_btn)
+        layout.addLayout(btn_row2)
 
         layout.addStretch()
         return panel
@@ -205,20 +229,42 @@ class MainWindow(QWidget):
     def _build_right_panel(self):
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        layout.addWidget(self._build_api_group())
-        layout.addWidget(self._build_proxy_group())
-        layout.addWidget(self._build_options_group())
-        layout.addWidget(self._build_input_group())
-        layout.addLayout(self._build_ctrl_buttons())
+        self.main_tabs = QTabWidget()
 
+        # ---- Tab 1: 数据采集 ----
+        tab_collect = QWidget()
+        collect_layout = QVBoxLayout(tab_collect)
+        collect_layout.addWidget(self._build_api_group())
+        collect_layout.addWidget(self._build_options_group())
+        collect_layout.addWidget(self._build_input_group())
+        collect_layout.addLayout(self._build_ctrl_buttons())
         self.progress = QProgressBar()
-        layout.addWidget(self.progress)
-
+        collect_layout.addWidget(self.progress)
         self.step_label = QLabel("")
         self.step_label.setStyleSheet("color: #666; font-size: 11px;")
-        layout.addWidget(self.step_label)
+        collect_layout.addWidget(self.step_label)
+        collect_layout.addStretch()
+        self.main_tabs.addTab(tab_collect, "📦 数据采集")
 
+        # ---- Tab 2: 时间分析 ----
+        tab_time = QWidget()
+        time_layout = QVBoxLayout(tab_time)
+        self.time_slice_group = self._build_time_slice_group()
+        time_layout.addWidget(self.time_slice_group)
+        time_layout.addWidget(self._build_timeline_group())
+        time_layout.addStretch()
+        self.main_tabs.addTab(tab_time, "🕐 时间分析")
+
+        # ---- Tab 3: 自动监测 ----
+        tab_auto = QWidget()
+        auto_layout = QVBoxLayout(tab_auto)
+        auto_layout.addWidget(self._build_schedule_group())
+        auto_layout.addStretch()
+        self.main_tabs.addTab(tab_auto, "⏰ 自动监测")
+
+        layout.addWidget(self.main_tabs)
         return panel
 
     def _build_api_group(self):
@@ -274,6 +320,41 @@ class MainWindow(QWidget):
         layout.addLayout(form)
         group.setLayout(layout)
         return group
+
+    # 数据源时间能力速查表
+    # 图标: 📅 = 时间序列(受日期范围影响)  ⚡ = 实时快照  📸 = 固定时间快照
+    _TIME_INFO = {
+        # ---- 天气与空气质量 ----
+        "air_quality":        ("⚡", "实时空气质量快照\nOpenWeatherMap 免费 API\n仅返回当前时刻的 AQI 和污染物浓度\n如需历史数据需升级至付费订阅"),
+        "weather":            ("⚡", "实时天气快照\nOpenWeatherMap 免费 API\n仅返回当前时刻的气温/湿度/风速等\n如需历史数据需升级至付费订阅"),
+        # ---- 街景 ----
+        "streetview":         ("📸", "单次街景快照\n百度街景内部 API\n返回该位置最近一次采集的全景图\n拍摄日期取决于百度采集车经过的时间（通常 1-3 年前）"),
+        # ---- GEE 遥感基础 ----
+        "gee_viirs":          ("📅", "VIIRS 夜间灯光 — 时间序列\n数据集: NOAA/VIIRS/DNB\n时间范围: 2012-04 ~ 至今（月合成）\n受上方日期范围控制"),
+        "gee_ndvi":           ("📅", "NDVI 植被指数 — 时间序列\n数据集: Sentinel-2 MSI\n时间范围: 2015-06 ~ 至今（5天重访）\n受上方日期范围控制，自动过滤云量>20%"),
+        "gee_lst":            ("📅", "LST 地表温度 — 时间序列\n数据集: Landsat 8 TIRS\n时间范围: 2013-03 ~ 至今（16天重访）\n受上方日期范围控制，自动过滤云量>20%"),
+        "gee_elevation":      ("📸", "海拔数据 — 静态\n数据集: SRTM GL1 (30m)\n2000 年测绘，永久不变"),
+        "gee_precipitation":  ("📅", "降水量 — 时间序列\n数据集: CHIRPS Daily\n时间范围: 1981-01-01 ~ 至今（日值）\n受上方日期范围控制"),
+        "gee_ndwi":           ("📅", "NDWI 水体指数 — 时间序列\n数据集: Sentinel-2 MSI\n时间范围: 2015-06 ~ 至今\n受上方日期范围控制"),
+        "gee_evi":            ("📅", "EVI 增强植被指数 — 时间序列\n数据集: Sentinel-2 MSI\n时间范围: 2015-06 ~ 至今\n受上方日期范围控制"),
+        "gee_population":     ("📸", "人口密度 — 静态\n数据集: WorldPop (100m, 2020年)\n备选: GPW v4 (1km, 2020年)\n无历史年份数据"),
+        "gee_era5_climate":   ("📅", "ERA5 气候逐日 — 时间序列\n数据集: ECMWF/ERA5-Land Hourly\n时间范围: 1950-01 ~ 至今（小时→日聚合）\n受上方日期范围控制，最多 366 天"),
+        "gee_era5_hourly":    ("📅", "ERA5 逐时数据 — 单日\n数据集: ECMWF/ERA5-Land Hourly\n时间范围: 1950-01 ~ 至今\n取结束日期的 24 小时逐时值\n注意: ERA5-Land 有 3-5 天发布延迟"),
+        # ---- GEE 遥感扩展 ----
+        "gee_landcover":      ("📸", "ESA WorldCover 土地覆盖 — 静态\n数据集: ESA/WorldCover/v200\n2021 年快照（10m 分辨率）\n另有 v100 (2020年) 可对比"),
+        "gee_s5p_no2":        ("📅", "Sentinel-5P NO₂ — 时间序列\n数据集: Sentinel-5P TROPOMI\n时间范围: 2018-07 ~ 至今（日值）\n受上方日期范围控制"),
+        "gee_jrc_water":      ("📸", "JRC 全球地表水 — 长期统计\n数据集: JRC GSW (30m)\n1984-2021 年合成统计图\n非时间序列，为多年平均值"),
+        "gee_modis_lst":      ("📅", "MODIS LST — 时间序列\n数据集: MODIS MOD11A2\n时间范围: 2000-02 ~ 至今（8天合成）\n受上方日期范围控制"),
+        "gee_dynamic_world":  ("📅", "Dynamic World 土地覆盖 — 时间序列\n数据集: Dynamic World V1\n时间范围: 2016-06 ~ 至今（2-5天重访）\n受上方日期范围控制"),
+        "gee_hansen_forest":  ("📸", "Hansen 森林变化 — 长期统计\n数据集: Hansen GFC 2023 v1.11\n2000-2023 年合成图（30m）\n逐年损失数据已输出为 hansen_loss_by_year.csv"),
+        "gee_canopy_height":  ("📸", "ETH 全球树冠高度 — 静态\n数据集: ETH Canopy Height 2020\n2020 年快照（10m 分辨率）\n需 GEE 社区数据集权限"),
+        # ---- OSM 矢量 ----
+        "osm_roads":          ("📸", "OSM 道路网络 — 实时快照\n通过 osmnx 从 OpenStreetMap 拉取\n始终为当前最新数据\n无时间维度，但可本地存档各时点结果"),
+        "osm_buildings":      ("📸", "OSM 建筑物 — 实时快照\n始终为当前最新 OSM 数据"),
+        "osm_green_spaces":   ("📸", "OSM 绿地 — 实时快照\n始终为当前最新 OSM 数据"),
+        "osm_water_bodies":   ("📸", "OSM 水体 — 实时快照\n始终为当前最新 OSM 数据"),
+        "osm_stats":          ("📸", "OSM 统计指标 — 实时快照\n基于当前最新 OSM 数据计算"),
+    }
 
     def _build_options_group(self):
         """构建细粒度数据采集选项面板，每个子功能有独立复选框。"""
@@ -331,8 +412,8 @@ class MainWindow(QWidget):
         ])
         scroll_layout.addWidget(g_sv)
 
-        # 🛰️ GEE 遥感
-        g_gee, self.opt_gee = make_group("🛰️ GEE 遥感数据", [
+        # 🛰️ GEE 遥感 — 基础
+        g_gee, self.opt_gee = make_group("🛰️ GEE 遥感数据 — 基础", [
             ("gee_viirs", "VIIRS 夜间灯光"),
             ("gee_ndvi", "NDVI 植被指数"),
             ("gee_lst", "LST 地表温度"),
@@ -345,6 +426,21 @@ class MainWindow(QWidget):
             ("gee_era5_hourly", "ERA5 逐时"),
         ])
         scroll_layout.addWidget(g_gee)
+
+        # 🛰️ GEE 遥感 — 扩展
+        g_gee2, self.opt_gee2 = make_group("🛰️ GEE 遥感数据 — 扩展", [
+            ("gee_landcover", "土地覆盖 (ESA WorldCover)"),
+            ("gee_s5p_no2", "Sentinel-5P NO₂ 污染"),
+            ("gee_jrc_water", "JRC 地表水体"),
+            ("gee_modis_lst", "MODIS LST (8天合成)"),
+            ("gee_dynamic_world", "Dynamic World 地类"),
+            ("gee_hansen_forest", "Hansen 森林变化"),
+            ("gee_canopy_height", "ETH 树冠高度"),
+        ])
+        scroll_layout.addWidget(g_gee2)
+
+        # 合并 GEE 复选框字典
+        self.opt_gee.update(self.opt_gee2)
 
         # 🗺️ OSM 矢量
         g_osm, self.opt_osm = make_group("🗺️ OSM 矢量数据", [
@@ -360,51 +456,19 @@ class MainWindow(QWidget):
         scroll.setWidget(scroll_widget)
         outer_layout.addWidget(scroll)
 
+        # ---- 时间能力标注：为所有 checkbox 设置 tooltip ----
+        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm]:
+            for key, cb in opt_dict.items():
+                info = self._TIME_INFO.get(key)
+                if info:
+                    _icon, desc = info
+                    cb.setToolTip(desc)
+
         # ---- 全选/取消逻辑 ----
         select_all_btn.clicked.connect(lambda: [cb.setChecked(True) for cb in all_checkboxes])
         deselect_all_btn.clicked.connect(lambda: [cb.setChecked(False) for cb in all_checkboxes])
 
         group.setLayout(outer_layout)
-        return group
-
-    def _build_proxy_group(self):
-        group = QGroupBox("🔗 代理设置（国内环境：被墙服务走代理，百度直连）")
-        layout = QVBoxLayout()
-
-        url_row = QHBoxLayout()
-        url_row.addWidget(QLabel("代理地址:"))
-        self.proxy_url_input = QLineEdit()
-        self.proxy_url_input.setPlaceholderText("如 http://127.0.0.1:7890（留空则不使用代理）")
-        self.proxy_url_input.setText(self.settings.value("proxy/url", ""))
-        url_row.addWidget(self.proxy_url_input)
-        layout.addLayout(url_row)
-
-        cb_row = QHBoxLayout()
-        cb_row.addWidget(QLabel("服务开关:"))
-        self.proxy_air_cb = QCheckBox("OpenWeatherMap")
-        self.proxy_gee_cb = QCheckBox("GEE")
-        self.proxy_osm_cb = QCheckBox("OSM")
-        self.proxy_street_cb = QCheckBox("百度街景")
-
-        # 默认：百度不走代理（走了会被拒），其余走代理
-        self.proxy_air_cb.setChecked(True)
-        self.proxy_gee_cb.setChecked(True)
-        self.proxy_osm_cb.setChecked(True)
-        self.proxy_street_cb.setChecked(False)
-        self.proxy_street_cb.setToolTip("百度地图检测海外 IP，走代理会导致请求被拒")
-
-        cb_row.addWidget(self.proxy_air_cb)
-        cb_row.addWidget(self.proxy_gee_cb)
-        cb_row.addWidget(self.proxy_osm_cb)
-        cb_row.addWidget(self.proxy_street_cb)
-        cb_row.addStretch()
-        layout.addLayout(cb_row)
-
-        hint = QLabel("提示：使用 Clash/V2Ray 等工具时，请确保百度走直连规则，其余走代理")
-        hint.setStyleSheet("color: #888; font-size: 11px;")
-        layout.addWidget(hint)
-
-        group.setLayout(layout)
         return group
 
     def _build_input_group(self):
@@ -453,6 +517,103 @@ class MainWindow(QWidget):
         group.setLayout(layout)
         return group
 
+    def _build_time_slice_group(self):
+        """Tab 2: 时间切片对比面板。"""
+        group = QGroupBox("🕐 多时间段对比")
+        group.setCheckable(True)
+        group.setChecked(False)
+        group.setToolTip(
+            "勾选后，对同一位置按不同年份分别采集。\n"
+            "完成后在左侧历史面板可对比不同年份的数据变化"
+        )
+        layout = QVBoxLayout()
+
+        # 快捷预设
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel("快捷预设:"))
+        for years, label in [(3, "近3年"), (5, "近5年"), (10, "近10年")]:
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda checked, n=years: self._preset_time_slices(n))
+            preset_row.addWidget(btn)
+        custom_btn = QPushButton("自定义年份...")
+        custom_btn.clicked.connect(self._gen_time_slices_from_years)
+        preset_row.addWidget(custom_btn)
+        preset_row.addStretch()
+        layout.addLayout(preset_row)
+
+        # 预览标签
+        self.time_slice_preview = QLabel("未设置切片")
+        self.time_slice_preview.setStyleSheet(
+            "color: #555; font-size: 11px; padding: 4px 8px;"
+            "background: #f8f8f8; border-radius: 4px;"
+        )
+        self.time_slice_preview.setWordWrap(True)
+        layout.addWidget(self.time_slice_preview)
+
+        # 隐藏的表格（存储数据，_get_time_slices 从中读取）
+        self.time_slice_table = QTableWidget(0, 3)
+        self.time_slice_table.setHorizontalHeaderLabels(["开始日期", "结束日期", "标签"])
+        self.time_slice_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.time_slice_table.setVisible(False)
+        layout.addWidget(self.time_slice_table)
+
+        # 手动操作按钮
+        manual_row = QHBoxLayout()
+        add_btn = QPushButton("➕ 手动添加")
+        add_btn.clicked.connect(lambda: (
+            self._add_time_slice(),
+            self.time_slice_table.setVisible(True),
+        ))
+        manual_row.addWidget(add_btn)
+        toggle_table_btn = QPushButton("📝 编辑表格")
+        toggle_table_btn.clicked.connect(
+            lambda: self.time_slice_table.setVisible(
+                not self.time_slice_table.isVisible()
+            )
+        )
+        manual_row.addWidget(toggle_table_btn)
+        clear_btn = QPushButton("清空全部")
+        clear_btn.clicked.connect(self._clear_time_slices)
+        manual_row.addWidget(clear_btn)
+        manual_row.addStretch()
+        layout.addLayout(manual_row)
+
+        group.setLayout(layout)
+        return group
+
+    def _build_timeline_group(self):
+        """Tab 2: 时间线查询面板。"""
+        group = QGroupBox("📊 历史数据时间线")
+        layout = QVBoxLayout()
+
+        desc = QLabel(
+            "查询指定位置在本地数据库中所有历史采集记录，"
+            "观察各项指标随时间的变化趋势"
+        )
+        desc.setStyleSheet("color: #666; font-size: 11px; padding: 2px 0;")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        btn_row = QHBoxLayout()
+        timeline_btn = QPushButton("📊 查看时间线")
+        timeline_btn.setToolTip(
+            "使用点位表格第一行的坐标查询历史采集时间线"
+        )
+        timeline_btn.clicked.connect(self._show_timeline_view)
+        btn_row.addWidget(timeline_btn)
+
+        summary_btn = QPushButton("📋 缓存统计")
+        summary_btn.setToolTip("查看本地缓存数据库的统计信息")
+        summary_btn.clicked.connect(self._show_cache_stats)
+        btn_row.addWidget(summary_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        group.setLayout(layout)
+        return group
+
     def _build_ctrl_buttons(self):
         layout = QHBoxLayout()
 
@@ -481,6 +642,231 @@ class MainWindow(QWidget):
         layout.addStretch()
         layout.addWidget(export_btn)
         return layout
+
+    # ==================== 定时采集 ====================
+
+    def _build_schedule_group(self):
+        """构建定时采集面板。"""
+        group = QGroupBox("⏰ 定时采集")
+        group.setCheckable(True)
+        group.setChecked(False)
+        group.setToolTip("启用后按设定频率自动采集数据")
+        layout = QVBoxLayout()
+
+        # 频率行
+        freq_row = QHBoxLayout()
+        freq_row.addWidget(QLabel("采集频率:"))
+        self.schedule_freq_combo = QComboBox()
+        self.schedule_freq_combo.addItems([
+            "每天", "每周", "每月",
+        ])
+        freq_row.addWidget(self.schedule_freq_combo)
+        freq_row.addWidget(QLabel("执行时间:"))
+        self.schedule_time_edit = QTimeEdit()
+        self.schedule_time_edit.setTime(QTime(8, 0))
+        self.schedule_time_edit.setDisplayFormat("HH:mm")
+        freq_row.addWidget(self.schedule_time_edit)
+        freq_row.addStretch()
+        layout.addLayout(freq_row)
+
+        # 模式行
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("时间模式:"))
+        self.schedule_mode_combo = QComboBox()
+        self.schedule_mode_combo.addItems([
+            "近 30 天 (滑动窗口)", "近 90 天", "近 365 天",
+        ])
+        self.schedule_mode_combo.setToolTip(
+            "每次自动采集使用的日期范围"
+        )
+        mode_row.addWidget(self.schedule_mode_combo)
+        mode_row.addStretch()
+        layout.addLayout(mode_row)
+
+        # 状态和按钮行
+        ctrl_row = QHBoxLayout()
+        self.schedule_status_label = QLabel("⏸️ 未启动")
+        self.schedule_status_label.setStyleSheet(
+            "font-weight: bold; color: #888;"
+        )
+        ctrl_row.addWidget(self.schedule_status_label)
+
+        self.schedule_next_label = QLabel("")
+        self.schedule_next_label.setStyleSheet("color: #666; font-size: 11px;")
+        ctrl_row.addWidget(self.schedule_next_label)
+        ctrl_row.addStretch()
+
+        self.schedule_start_btn = QPushButton("▶ 启动")
+        self.schedule_start_btn.clicked.connect(self._start_schedule)
+        ctrl_row.addWidget(self.schedule_start_btn)
+
+        self.schedule_stop_btn = QPushButton("⏹ 停止")
+        self.schedule_stop_btn.setEnabled(False)
+        self.schedule_stop_btn.clicked.connect(self._stop_schedule)
+        ctrl_row.addWidget(self.schedule_stop_btn)
+
+        layout.addLayout(ctrl_row)
+
+        group.setLayout(layout)
+        return group
+
+    def _calc_schedule_interval(self):
+        """计算定时采集间隔（毫秒）。"""
+        freq = self.schedule_freq_combo.currentText()
+        if freq == "每天":
+            return 24 * 60 * 60 * 1000
+        elif freq == "每周":
+            return 7 * 24 * 60 * 60 * 1000
+        else:  # 每月
+            return 30 * 24 * 60 * 60 * 1000
+
+    def _get_schedule_days(self):
+        """获取定时采集的日期回溯天数。"""
+        mode = self.schedule_mode_combo.currentText()
+        if "30 天" in mode:
+            return 30
+        elif "90 天" in mode:
+            return 90
+        else:
+            return 365
+
+    def _start_schedule(self):
+        """启动定时采集。"""
+        interval = self._calc_schedule_interval()
+        self._schedule_timer = QTimer()
+        self._schedule_timer.timeout.connect(self._scheduled_collect)
+        self._schedule_timer.start(interval)
+
+        # 计算下次执行时间
+        now = datetime.now()
+        target_time = self.schedule_time_edit.time()
+        target_dt = now.replace(
+            hour=target_time.hour(),
+            minute=target_time.minute(),
+            second=0, microsecond=0,
+        )
+        if target_dt <= now:
+            target_dt = target_dt.replace(day=target_dt.day + 1) if self.schedule_freq_combo.currentText() == "每天" else target_dt
+
+        self.schedule_status_label.setText("▶ 运行中")
+        self.schedule_status_label.setStyleSheet("font-weight: bold; color: #27ae60;")
+        self.schedule_next_label.setText(
+            f"下次: {target_dt.strftime('%m-%d %H:%M')}"
+        )
+        self.schedule_start_btn.setEnabled(False)
+        self.schedule_stop_btn.setEnabled(True)
+
+        # 持久化到 QSettings
+        self.settings.setValue("schedule/enabled", True)
+        self.settings.setValue("schedule/frequency", self.schedule_freq_combo.currentText())
+        self.settings.setValue("schedule/mode", self.schedule_mode_combo.currentText())
+        self.settings.setValue("schedule/time", self.schedule_time_edit.time().toString("HH:mm"))
+        self.settings.sync()
+
+        self.log_box.append("⏰ 定时采集已启动")
+
+    def _stop_schedule(self):
+        """停止定时采集。"""
+        if hasattr(self, "_schedule_timer") and self._schedule_timer:
+            self._schedule_timer.stop()
+
+        self.schedule_status_label.setText("⏸️ 未启动")
+        self.schedule_status_label.setStyleSheet("font-weight: bold; color: #888;")
+        self.schedule_next_label.setText("")
+        self.schedule_start_btn.setEnabled(True)
+        self.schedule_stop_btn.setEnabled(False)
+
+        self.settings.setValue("schedule/enabled", False)
+        self.settings.sync()
+
+        self.log_box.append("⏰ 定时采集已停止")
+
+    def _scheduled_collect(self):
+        """定时触发一次采集。"""
+        from datetime import timedelta
+
+        now = datetime.now()
+        days = self._get_schedule_days()
+        sd = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+        ed = now.strftime("%Y-%m-%d")
+
+        self.log_box.append(f"⏰ 定时采集触发 — {sd} ~ {ed}")
+
+        # 记录执行历史
+        try:
+            from local_cache import get_cache
+            cache = get_cache()
+            cache.record_schedule_run("running")
+        except Exception:
+            pass
+
+        # 复用 _start_tasks 逻辑（简版：直接构建任务并执行）
+        tasks = []
+        for row in range(self.table.rowCount()):
+            try:
+                lon = float(self.table.item(row, 0).text())
+                lat = float(self.table.item(row, 1).text())
+                r = int(float(self.table.item(row, 2).text()))
+            except (ValueError, AttributeError):
+                continue
+            if not (-180 <= lon <= 180 and -90 <= lat <= 90):
+                continue
+            tasks.append((lon, lat, r, sd, ed))
+
+        if not tasks:
+            self.log_box.append("⚠️ 定时采集：无有效点位，跳过")
+            try:
+                from local_cache import get_cache
+                get_cache().record_schedule_run("failed", error_msg="无有效点位")
+            except Exception:
+                pass
+            return
+
+        # 更新下次执行时间
+        self.schedule_next_label.setText(
+            f"上次: {now.strftime('%m-%d %H:%M')} | "
+            f"下次: {(now + timedelta(milliseconds=self._calc_schedule_interval())).strftime('%m-%d %H:%M')}"
+        )
+
+        # 构建选项
+        options = {}
+        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm]:
+            for key, cb in opt_dict.items():
+                options[key] = cb.isChecked()
+
+        self.worker = Worker(
+            tasks,
+            self.baidu_key_input.text(),
+            self.weather_key_input.text(),
+            self.gee_key_input.text(),
+            options,
+            file_logger=self.file_logger.log,
+            output_base_dir=self.output_dir_input.text().strip() or None,
+        )
+        self.worker.log.connect(self.log_box.append)
+        self.worker.progress.connect(self.progress.setValue)
+        self.worker.step_progress.connect(self._on_step_progress)
+        self.worker.result_ready.connect(self._on_result_ready)
+
+        def on_schedule_finished(dirs):
+            duration = (datetime.now() - now).total_seconds() * 1000
+            status = "success" if dirs else "failed"
+            try:
+                from local_cache import get_cache
+                get_cache().record_schedule_run(
+                    status,
+                    output_dir=dirs[0] if dirs else "",
+                    duration_ms=int(duration),
+                )
+            except Exception:
+                pass
+            self.log_box.append(
+                f"⏰ 定时采集完成 — {len(dirs)} 个结果 ({duration/1000:.1f}s)"
+            )
+            self._load_history()
+
+        self.worker.finished.connect(on_schedule_finished)
+        self.worker.start()
 
     # ==================== 表格操作 ====================
 
@@ -564,6 +950,115 @@ class MainWindow(QWidget):
             self.settings.setValue("keys/gee_key", file_path)
             self.log_box.append(f"✅ 已导入 GEE 密钥文件: {file_path}")
 
+    # ==================== 时间切片管理 ====================
+
+    def _update_time_slice_preview(self):
+        """更新切片预览标签。"""
+        slices = self._get_time_slices()
+        if not slices:
+            self.time_slice_preview.setText("未设置切片 — 点击上方快捷预设或手动添加")
+            self.time_slice_preview.setStyleSheet(
+                "color: #999; font-size: 11px; padding: 4px 8px;"
+                "background: #f8f8f8; border-radius: 4px;"
+            )
+            return
+
+        lines = [f"将采集 <b>{len(slices)}</b> 个时间段:"]
+        for sd, ed, lbl in slices:
+            lines.append(f"  • <b>{lbl}</b>（{sd} ~ {ed}）")
+        preview = "<br>".join(lines)
+        self.time_slice_preview.setText(preview)
+        self.time_slice_preview.setStyleSheet(
+            "color: #2c3e50; font-size: 11px; padding: 4px 8px;"
+            "background: #eaf7ea; border-radius: 4px; border: 1px solid #a3d4a3;"
+        )
+
+    def _preset_time_slices(self, n_years):
+        """快捷预设：生成近 N 年逐年切片。"""
+        from datetime import datetime as dt
+        current_year = dt.now().year
+        self.time_slice_table.setRowCount(0)
+        for y in range(current_year - n_years + 1, current_year + 1):
+            self._add_time_slice(
+                sd=f"{y}-01-01",
+                ed=f"{y}-12-31",
+                label=f"{y}年",
+            )
+        self._update_time_slice_preview()
+        self.log_box.append(f"✅ 已生成近 {n_years} 年时间切片（{len(self._get_time_slices())} 个）")
+
+    def _add_time_slice(self, sd=None, ed=None, label=""):
+        """添加一个时间切片行。"""
+        row = self.time_slice_table.rowCount()
+        self.time_slice_table.insertRow(row)
+
+        # 默认使用当前日期选择器的值
+        if sd is None:
+            sd = self.start_date.date().toString("yyyy-MM-dd")
+        if ed is None:
+            ed = self.end_date.date().toString("yyyy-MM-dd")
+        if not label:
+            label = f"切片{row + 1}"
+
+        self.time_slice_table.setItem(row, 0, QTableWidgetItem(sd))
+        self.time_slice_table.setItem(row, 1, QTableWidgetItem(ed))
+        self.time_slice_table.setItem(row, 2, QTableWidgetItem(label))
+        self._update_time_slice_preview()
+
+    def _remove_time_slice(self):
+        """删除选中的时间切片行。"""
+        rows = set()
+        for item in self.time_slice_table.selectedItems():
+            rows.add(item.row())
+        for row in sorted(rows, reverse=True):
+            self.time_slice_table.removeRow(row)
+        self._update_time_slice_preview()
+
+    def _clear_time_slices(self):
+        """清空所有时间切片。"""
+        self.time_slice_table.setRowCount(0)
+        self._update_time_slice_preview()
+
+    def _gen_time_slices_from_years(self):
+        """从年份列表生成时间切片。"""
+        text, ok = QInputDialog.getText(
+            self, "自定义年份",
+            "输入要对比的年份，用逗号分隔\n\n"
+            "例如: 2015,2020,2025\n"
+            "将对每个年份生成 1月1日~12月31日 的整年切片",
+        )
+        if not ok or not text.strip():
+            return
+
+        try:
+            years = [int(y.strip()) for y in text.split(",") if y.strip()]
+        except ValueError:
+            QMessageBox.warning(self, "格式错误", "请输入有效的年份数字，用逗号分隔")
+            return
+
+        self.time_slice_table.setRowCount(0)
+        for year in sorted(set(years)):
+            self._add_time_slice(
+                sd=f"{year}-01-01",
+                ed=f"{year}-12-31",
+                label=f"{year}年",
+            )
+        self._update_time_slice_preview()
+
+    def _get_time_slices(self):
+        """读取时间切片表格内容，返回 [(start_date, end_date, label), ...]。"""
+        slices = []
+        for row in range(self.time_slice_table.rowCount()):
+            try:
+                sd = self.time_slice_table.item(row, 0).text().strip()
+                ed = self.time_slice_table.item(row, 1).text().strip()
+                lbl = self.time_slice_table.item(row, 2).text().strip()
+                if sd and ed:
+                    slices.append((sd, ed, lbl or f"切片{row + 1}"))
+            except AttributeError:
+                continue
+        return slices
+
     # ==================== 任务控制 ====================
 
     def _start_tasks(self):
@@ -578,7 +1073,9 @@ class MainWindow(QWidget):
             secure_store("baidu_key", self.baidu_key_input.text()),
         )
         self.settings.setValue("paths/output_dir", self.output_dir_input.text())
-        self.settings.setValue("proxy/url", self.proxy_url_input.text())
+
+        # 确保设置立即写入磁盘（Windows 注册表），避免意外退出导致丢失
+        self.settings.sync()
 
         # 构建细粒度选项 dict
         options = {}
@@ -628,9 +1125,21 @@ class MainWindow(QWidget):
                 )
                 return
 
-            sd = self.start_date.date().toString("yyyy-MM-dd")
-            ed = self.end_date.date().toString("yyyy-MM-dd")
-            tasks.append((lon, lat, r, sd, ed))
+            # 检查是否启用时间切片模式
+            if self.time_slice_group.isChecked():
+                time_slices = self._get_time_slices()
+                if time_slices:
+                    for ts_sd, ts_ed, ts_label in time_slices:
+                        tasks.append((lon, lat, r, ts_sd, ts_ed, ts_label))
+                else:
+                    # 时间切片模式启用但无切片 → 回退到默认日期
+                    sd = self.start_date.date().toString("yyyy-MM-dd")
+                    ed = self.end_date.date().toString("yyyy-MM-dd")
+                    tasks.append((lon, lat, r, sd, ed))
+            else:
+                sd = self.start_date.date().toString("yyyy-MM-dd")
+                ed = self.end_date.date().toString("yyyy-MM-dd")
+                tasks.append((lon, lat, r, sd, ed))
 
         if not tasks:
             self.log_box.append("请添加采集点")
@@ -647,16 +1156,6 @@ class MainWindow(QWidget):
         self.log_dialog.raise_()
         self.log_box.append(f"🚀 开始处理 {len(tasks)} 个任务...")
 
-        # 代理配置
-        proxy_url = self.proxy_url_input.text().strip()
-        proxy_config = {
-            "url": proxy_url,
-            "air": self.proxy_air_cb.isChecked(),
-            "street": self.proxy_street_cb.isChecked(),
-            "gee": self.proxy_gee_cb.isChecked(),
-            "osm": self.proxy_osm_cb.isChecked(),
-        } if proxy_url else None
-
         self.worker = Worker(
             tasks,
             self.baidu_key_input.text(),
@@ -665,7 +1164,6 @@ class MainWindow(QWidget):
             options,
             file_logger=self.file_logger.log,
             output_base_dir=output_base,
-            proxy_config=proxy_config,
         )
         self.worker.log.connect(self.log_box.append)
         self.worker.progress.connect(self.progress.setValue)
@@ -760,12 +1258,37 @@ class MainWindow(QWidget):
 
         # 海拔和人口统计（单行数据）
         for label, csv_name in [("海拔", "elevation_stats.csv"),
-                                 ("人口密度", "population_stats.csv")]:
+                                 ("人口密度", "population_stats.csv"),
+                                 ("土地覆盖", "landcover_stats.csv"),
+                                 ("地表水", "jrc_water_stats.csv"),
+                                 ("森林变化", "hansen_forest_stats.csv"),
+                                 ("树冠高度", "canopy_height_stats.csv")]:
             csv_path = os.path.join(current_dir, csv_name)
             if os.path.exists(csv_path):
                 df = pd.read_csv(csv_path)
                 report_lines.append(f"<h3>📊 {label}</h3>")
                 report_lines.append(df.to_html(index=False, border=1))
+
+        # Sentinel-5P NO₂（时间序列）
+        s5p_path = os.path.join(current_dir, "s5p_no2_stats.csv")
+        if os.path.exists(s5p_path):
+            df = pd.read_csv(s5p_path)
+            report_lines.append("<h3>📈 对流层 NO₂ (Sentinel-5P)</h3>")
+            report_lines.append(df.tail(10).to_html(index=False, border=1))
+
+        # MODIS LST
+        modis_path = os.path.join(current_dir, "modis_lst_stats.csv")
+        if os.path.exists(modis_path):
+            df = pd.read_csv(modis_path)
+            report_lines.append("<h3>📈 MODIS 地表温度 (8天合成)</h3>")
+            report_lines.append(df.tail(10).to_html(index=False, border=1))
+
+        # Dynamic World
+        dw_path = os.path.join(current_dir, "dw_stats.csv")
+        if os.path.exists(dw_path):
+            df = pd.read_csv(dw_path)
+            report_lines.append("<h3>📈 Dynamic World 土地覆盖</h3>")
+            report_lines.append(df.tail(10).to_html(index=False, border=1))
 
         # OSM 统计指标
         osm_stats_path = os.path.join(current_dir, "osm_stats.json")
@@ -880,6 +1403,41 @@ class MainWindow(QWidget):
                 except Exception:
                     pass
 
+            # 新增：土地覆盖
+            lc_path = os.path.join(out_dir, "landcover_stats.csv")
+            if os.path.exists(lc_path):
+                try:
+                    df = pd.read_csv(lc_path)
+                    data_rows = df[df['地物类别'] != '【汇总】']
+                    for _, r in data_rows.iterrows():
+                        row[f"地类_{r['地物类别']}_pct"] = r.get("占比_pct", "")
+                except Exception:
+                    pass
+
+            # 新增：森林变化
+            forest_path = os.path.join(out_dir, "hansen_forest_stats.csv")
+            if os.path.exists(forest_path):
+                try:
+                    df = pd.read_csv(forest_path)
+                    if not df.empty:
+                        r = df.iloc[0]
+                        row["树冠覆盖率2000_pct"] = r.get("2000年树冠覆盖率均值_pct", "")
+                        row["森林净变化_km2"] = r.get("净变化_km2", "")
+                except Exception:
+                    pass
+
+            # 新增：地表水
+            water_path = os.path.join(out_dir, "jrc_water_stats.csv")
+            if os.path.exists(water_path):
+                try:
+                    df = pd.read_csv(water_path)
+                    if not df.empty:
+                        r = df.iloc[0]
+                        row["常年水体面积_km2"] = r.get("常年水体面积_km2", "")
+                        row["水体出现频率_pct"] = r.get("水体出现频率均值_pct", "")
+                except Exception:
+                    pass
+
             rows.append(row)
 
         if not rows:
@@ -963,6 +1521,8 @@ class MainWindow(QWidget):
             "start_date": self.start_date.date().toString("yyyy-MM-dd"),
             "end_date": self.end_date.date().toString("yyyy-MM-dd"),
             "default_radius": self.radius_spin.value(),
+            "time_slices": self._get_time_slices(),
+            "time_slice_enabled": self.time_slice_group.isChecked(),
         }
 
         save_path, _ = QFileDialog.getSaveFileName(
@@ -1018,6 +1578,15 @@ class MainWindow(QWidget):
         if "default_radius" in project:
             self.radius_spin.setValue(project["default_radius"])
 
+        # 恢复时间切片
+        self.time_slice_table.setRowCount(0)
+        for ts in project.get("time_slices", []):
+            if len(ts) >= 3:
+                self._add_time_slice(sd=ts[0], ed=ts[1], label=ts[2])
+        self.time_slice_group.setChecked(
+            project.get("time_slice_enabled", False)
+        )
+
         self.log_box.append(f"📂 项目已加载: {len(project.get('points', []))} 个点位")
 
     # ==================== 结果回调 ====================
@@ -1045,6 +1614,8 @@ class MainWindow(QWidget):
         else:
             self.log_box.append("🎉 所有任务完成！")
             self.log_dialog.set_status("✅ 采集完成")
+        # 采集完成后自动刷新历史记录列表
+        self._load_history()
 
     def _update_result_display(self):
         if not self.output_dirs:
@@ -1107,7 +1678,23 @@ class MainWindow(QWidget):
                     folders.append(folder)
         folders.sort(key=os.path.getmtime, reverse=True)
 
+        # 获取时间筛选
+        filter_text = self.history_filter_combo.currentText()
+        now = datetime.now()
+        if filter_text == "最近 7 天":
+            cutoff = now.timestamp() - 7 * 86400
+        elif filter_text == "最近 30 天":
+            cutoff = now.timestamp() - 30 * 86400
+        elif filter_text == "最近 90 天":
+            cutoff = now.timestamp() - 90 * 86400
+        elif filter_text == "本年":
+            cutoff = datetime(now.year, 1, 1).timestamp()
+        else:
+            cutoff = 0  # 全部
+
         for folder in folders:
+            if cutoff > 0 and os.path.getmtime(folder) < cutoff:
+                continue
             # 尝试读取 meta.json 获取位置和时间信息
             meta_path = os.path.join(folder, "meta.json")
             display = os.path.basename(folder)
@@ -1118,7 +1705,7 @@ class MainWindow(QWidget):
                     loc = meta.get("location", "")
                     rtime = meta.get("readable_time", "")
                     if loc or rtime:
-                        display = f"{loc} | {rtime}" if loc and rtime else (loc or rtime)
+                        display = f"📍 {loc} | {rtime}" if loc and rtime else (loc or rtime)
                 except (json.JSONDecodeError, OSError):
                     pass
 
@@ -1126,6 +1713,18 @@ class MainWindow(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, folder)
             item.setToolTip(f"路径: {os.path.abspath(folder)}")
             self.history_list.addItem(item)
+
+        # 更新缓存统计
+        try:
+            from local_cache import get_cache
+            cache = get_cache()
+            s = cache.get_summary()
+            self.cache_stats_label.setText(
+                f"📊 共 {s['总采集次数']} 次采集 | {s['独立位置数']} 个位置 | "
+                f"最近: {s.get('最近采集', '无')[:16] if s.get('最近采集') else '无'}"
+            )
+        except Exception:
+            self.cache_stats_label.setText("")
 
     def _on_history_clicked(self, item):
         folder = item.data(Qt.ItemDataRole.UserRole)
@@ -1272,6 +1871,53 @@ class MainWindow(QWidget):
             except Exception:
                 pass
 
+        # 新增：土地覆盖
+        lc_path = os.path.join(output_dir, "landcover_stats.csv")
+        if os.path.exists(lc_path):
+            try:
+                df = pd.read_csv(lc_path)
+                data_rows = df[df['地物类别'] != '【汇总】']
+                for _, r in data_rows.iterrows():
+                    stats[f"[地类]{r['地物类别']}_pct"] = r.get("占比_pct", "")
+            except Exception:
+                pass
+
+        # 新增：森林变化
+        forest_path = os.path.join(output_dir, "hansen_forest_stats.csv")
+        if os.path.exists(forest_path):
+            try:
+                df = pd.read_csv(forest_path)
+                if not df.empty:
+                    r = df.iloc[0]
+                    for col in df.columns:
+                        stats[f"[森林]{col}"] = r[col]
+            except Exception:
+                pass
+
+        # 新增：树冠高度
+        canopy_path = os.path.join(output_dir, "canopy_height_stats.csv")
+        if os.path.exists(canopy_path):
+            try:
+                df = pd.read_csv(canopy_path)
+                if not df.empty:
+                    r = df.iloc[0]
+                    for col in df.columns:
+                        stats[f"[树冠]{col}"] = r[col]
+            except Exception:
+                pass
+
+        # 新增：地表水
+        water_path = os.path.join(output_dir, "jrc_water_stats.csv")
+        if os.path.exists(water_path):
+            try:
+                df = pd.read_csv(water_path)
+                if not df.empty:
+                    r = df.iloc[0]
+                    for col in df.columns:
+                        stats[f"[地表水]{col}"] = r[col]
+            except Exception:
+                pass
+
         return stats
 
     def _on_history_context_menu(self, pos: QPoint):
@@ -1319,6 +1965,102 @@ class MainWindow(QWidget):
     def _export_single(self, folder):
         """从右键菜单导出单条记录（复用 HTML 导出）。"""
         self._export_html(folder)
+
+    def _show_timeline_view(self):
+        """显示指定位置的历史数据时间线视图。"""
+        # 从当前表格获取第一个点的坐标
+        if self.table.rowCount() == 0:
+            QMessageBox.information(self, "提示", "请先在点位表格中添加一个位置")
+            return
+        try:
+            lon = float(self.table.item(0, 0).text())
+            lat = float(self.table.item(0, 1).text())
+            r = int(float(self.table.item(0, 2).text()))
+        except (ValueError, AttributeError):
+            QMessageBox.warning(self, "错误", "无法读取第一个点位的坐标")
+            return
+
+        try:
+            from local_cache import get_cache
+            cache = get_cache()
+            records = cache.get_timeline(lon, lat, radius=1000)
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"查询数据库失败: {e}")
+            return
+
+        if not records:
+            QMessageBox.information(
+                self, "时间线",
+                f"位置 ({lon:.4f}, {lat:.4f}) 附近没有历史采集记录。\n\n"
+                f"提示：执行一次采集后会自动记录到本地数据库。"
+            )
+            return
+
+        # 构建时间线对话框
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"📊 时间线视图 — ({lon:.4f}, {lat:.4f})")
+        dlg.resize(900, 500)
+        layout = QVBoxLayout(dlg)
+
+        info = QLabel(
+            f"<b>位置:</b> Lon={lon:.4f}, Lat={lat:.4f} | "
+            f"<b>半径:</b> {r}m | <b>共 {len(records)} 条记录</b>"
+        )
+        layout.addWidget(info)
+
+        table = QTableWidget()
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels([
+            "采集时间", "时间范围", "标签", "半径(m)", "产出文件数", "输出目录",
+        ])
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+
+        table.setRowCount(len(records))
+        for i, rec in enumerate(records):
+            table.setItem(i, 0, QTableWidgetItem(rec.get("collected_at", "")))
+            table.setItem(i, 1, QTableWidgetItem(
+                f"{rec.get('start_date', '')} ~ {rec.get('end_date', '')}"
+            ))
+            table.setItem(i, 2, QTableWidgetItem(rec.get("label", "")))
+            table.setItem(i, 3, QTableWidgetItem(str(rec.get("radius", ""))))
+            table.setItem(i, 4, QTableWidgetItem(str(rec.get("file_count", ""))))
+            table.setItem(i, 5, QTableWidgetItem(rec.get("output_dir", "")))
+
+        layout.addWidget(table)
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+        dlg.exec()
+
+    def _show_cache_stats(self):
+        """显示本地缓存数据库统计信息。"""
+        try:
+            from local_cache import get_cache
+            cache = get_cache()
+            summary = cache.get_summary()
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"读取缓存失败: {e}")
+            return
+
+        try:
+            from plugins.streetview_archive import StreetViewArchive
+            sv = StreetViewArchive()
+            sv_stats = sv.count_all()
+        except Exception:
+            sv_stats = {"总存档数": 0, "独立位置数": 0}
+
+        msg = (
+            f"📊 本地缓存统计\n\n"
+            f"采集记录: {summary['总采集次数']} 次 "
+            f"(成功 {summary['成功次数']} 次)\n"
+            f"独立位置: {summary['独立位置数']} 个\n"
+            f"最近采集: {summary.get('最近采集', '无')}\n\n"
+            f"街景存档: {sv_stats.get('总存档数', 0)} 张 "
+            f"({sv_stats.get('独立位置数', 0)} 个位置)"
+        )
+        QMessageBox.information(self, "📊 缓存统计", msg)
 
     def _clean_data_dialog(self):
         """打开清理数据对话框，支持自定义时间范围和选择性删除。"""
