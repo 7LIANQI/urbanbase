@@ -18,6 +18,7 @@ from collectors import (
     StreetViewCollector,
     GEECollector,
     OSMCollector,
+    LocalDataCollector,
 )
 
 # 默认选项：全部启用
@@ -47,6 +48,7 @@ _DEFAULT_OPTIONS = {
     "osm_green_spaces": True,
     "osm_water_bodies": True,
     "osm_stats": True,
+    "local_data": True,
 }
 
 
@@ -119,6 +121,9 @@ def _build_collectors(lon, lat, radius, start_date, end_date,
 
     if _any_osm(options):
         collectors.append(OSMCollector(**common))
+
+    if _opt(options, "local_data"):
+        collectors.append(LocalDataCollector(**common))
 
     return collectors
 
@@ -241,6 +246,17 @@ def process_location(lon, lat, radius=500, start_date=None, end_date=None,
         )
     except Exception:
         pass  # 缓存记录失败不影响主流程
+
+    # ---- 落库到 PostgreSQL 本地库 ----
+    try:
+        from pg_store import get_store
+        get_store().persist_output(
+            out_dir, lon, lat, radius, start_date, end_date,
+            options=options, label=label,
+        )
+        log("🗄️ 已落库到 PostgreSQL 本地库")
+    except Exception as e:
+        log(f"⚠️ PostgreSQL 落库失败（不影响主流程）: {e}")
 
     log(f"\n✅ 所有数据已保存至: {out_dir}")
     return out_dir

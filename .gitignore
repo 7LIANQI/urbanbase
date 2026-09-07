@@ -23,6 +23,14 @@ logs/
 # Output directories
 output_*/
 
+# 本地数据库缓存与测试缓存
+*.db
+.pytest_cache/
+
+# 合并输出文件与街景存档（运行时生成）
+merged_output_*.geojson
+streetview_archive/
+
 # Generated reports
 report/
 
@@ -35,3 +43,6 @@ report/
 # OS
 .DS_Store
 Thumbs.db
+
+# PostgreSQL 本地库（便携版二进制，通常装在仓库外 D:\PostgreSQL17）
+PostgreSQL*/

@@ -2,9 +2,21 @@
 import functools
 import logging
 import os
+import sys
 import time
 import traceback
 from datetime import datetime
+
+
+# ---- 控制台编码保护 ----
+# Windows 默认控制台常为 GBK，print 含 emoji/生僻字符时可能抛
+# UnicodeEncodeError。这里给 stdout/stderr 加上 errors="replace"，
+# 让不可编码字符被替换而非崩溃（中文显示不受影响）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
 
 
 def make_logger(callback=None):

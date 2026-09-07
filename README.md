@@ -106,6 +106,35 @@ code中期汇报/
 | 地表温度 | Landsat 8 Collection 2 Tier 1 | ST_B10 波段反演 |
 | 矢量地图 | OpenStreetMap + osmnx | 路网/建筑/绿地/水体 |
 
+## 本地数据 (PostgreSQL)
+
+平台支持把采集结果持久化到本地 PostgreSQL 库，并按坐标查询历史数据 / 导入导师提供的本地数据。
+
+- **写**：每次采集结束后，结果自动落库（采集记录、数值指标、OSM 矢量、文件引用）
+- **读**：勾选「🗄️ 本地数据」数据源，按经纬度查询附近历史采集；「本地数据」Tab 可手动查询、导入 CSV
+
+### 环境准备
+
+PostgreSQL 采用便携版二进制（免安装、免管理员），默认装在 `D:\PostgreSQL17`：
+
+```bash
+# 启动 / 停止
+scripts\pg_start.bat
+scripts\pg_stop.bat
+# 首次初始化（仅当 data 目录不存在时）
+scripts\pg_init.bat
+```
+
+默认连接（`config.py` 中可改，UI「本地数据」Tab 也可配置）：
+
+| 项 | 默认值 |
+|----|--------|
+| 主机 / 端口 | localhost : 5432 |
+| 数据库 | urban_analysis |
+| 用户 / 密码 | postgres / postgres |
+
+首次使用时在「本地数据」Tab 点「🛠️ 初始化表」创建 6 张表。
+
 ## 许可证
 
 本项目仅供学术研究与学习使用。

@@ -29,6 +29,7 @@ from .widgets import (
     StatsWidget,
 )
 from utils import FileLogger, secure_store, secure_load
+from config import PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD
 
 
 class LogDialog(QDialog):
@@ -264,6 +265,12 @@ class MainWindow(QWidget):
         auto_layout.addStretch()
         self.main_tabs.addTab(tab_auto, "⏰ 自动监测")
 
+        # ---- Tab 4: 本地数据 ----
+        tab_local = QWidget()
+        local_layout = QVBoxLayout(tab_local)
+        local_layout.addWidget(self._build_local_group())
+        self.main_tabs.addTab(tab_local, "🗄️ 本地数据")
+
         layout.addWidget(self.main_tabs)
         return panel
 
@@ -354,6 +361,8 @@ class MainWindow(QWidget):
         "osm_green_spaces":   ("📸", "OSM 绿地 — 实时快照\n始终为当前最新 OSM 数据"),
         "osm_water_bodies":   ("📸", "OSM 水体 — 实时快照\n始终为当前最新 OSM 数据"),
         "osm_stats":          ("📸", "OSM 统计指标 — 实时快照\n基于当前最新 OSM 数据计算"),
+        # ---- 本地数据 ----
+        "local_data":         ("🗄️", "本地数据 — 查询 PostgreSQL 本地库\n按经纬度/时间范围查询历史采集结果\n及导师导入的本地数据集\n（需在「本地数据」Tab 配置连接）"),
     }
 
     def _build_options_group(self):
@@ -452,12 +461,18 @@ class MainWindow(QWidget):
         ])
         scroll_layout.addWidget(g_osm)
 
+        # 🗄️ 本地数据
+        g_local, self.opt_local = make_group("🗄️ 本地数据 (PostgreSQL)", [
+            ("local_data", "本地历史 + 导师数据"),
+        ])
+        scroll_layout.addWidget(g_local)
+
         scroll_layout.addStretch()
         scroll.setWidget(scroll_widget)
         outer_layout.addWidget(scroll)
 
         # ---- 时间能力标注：为所有 checkbox 设置 tooltip ----
-        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm]:
+        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm, self.opt_local]:
             for key, cb in opt_dict.items():
                 info = self._TIME_INFO.get(key)
                 if info:
@@ -830,9 +845,15 @@ class MainWindow(QWidget):
 
         # 构建选项
         options = {}
-        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm]:
+        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm, self.opt_local]:
             for key, cb in opt_dict.items():
                 options[key] = cb.isChecked()
+
+        # 同步 PostgreSQL 连接配置
+        try:
+            self._get_pg_store()
+        except Exception:
+            pass
 
         self.worker = Worker(
             tasks,
@@ -1077,9 +1098,15 @@ class MainWindow(QWidget):
         # 确保设置立即写入磁盘（Windows 注册表），避免意外退出导致丢失
         self.settings.sync()
 
+        # 同步 PostgreSQL 连接配置（供采集管线写库/读库使用）
+        try:
+            self._get_pg_store()
+        except Exception:
+            pass
+
         # 构建细粒度选项 dict
         options = {}
-        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm]:
+        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm, self.opt_local]:
             for key, cb in opt_dict.items():
                 options[key] = cb.isChecked()
 
@@ -1510,7 +1537,7 @@ class MainWindow(QWidget):
 
         # 收集选项
         options = {}
-        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm]:
+        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm, self.opt_local]:
             for key, cb in opt_dict.items():
                 options[key] = cb.isChecked()
 
@@ -1560,7 +1587,7 @@ class MainWindow(QWidget):
 
         # 恢复选项
         options = project.get("options", {})
-        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm]:
+        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm, self.opt_local]:
             for key, cb in opt_dict.items():
                 cb.setChecked(options.get(key, True))
 
@@ -2250,6 +2277,281 @@ class MainWindow(QWidget):
         layout.addLayout(btn_row)
 
         dlg.exec()
+
+    # ==================== 本地数据 (PostgreSQL) ====================
+
+    def _build_local_group(self):
+        """构建「本地数据」Tab：连接设置 + 查询 + 导入导师数据。"""
+        panel = QWidget()
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(6, 6, 6, 6)
+
+        # ---- 连接设置 ----
+        conn_group = QGroupBox("🔌 PostgreSQL 连接设置")
+        form = QGridLayout()
+
+        self.pg_host_input = QLineEdit()
+        self.pg_port_input = QLineEdit()
+        self.pg_db_input = QLineEdit()
+        self.pg_user_input = QLineEdit()
+        self.pg_pwd_input = QLineEdit()
+        self.pg_pwd_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.pg_host_input.setText(self.settings.value("pg/host", PG_HOST))
+        self.pg_port_input.setText(self.settings.value("pg/port", str(PG_PORT)))
+        self.pg_db_input.setText(self.settings.value("pg/dbname", PG_DBNAME))
+        self.pg_user_input.setText(self.settings.value("pg/user", PG_USER))
+        stored_pwd = self.settings.value("pg/password", "")
+        self.pg_pwd_input.setText(
+            secure_load("pg_pwd", stored_pwd) if stored_pwd else PG_PASSWORD
+        )
+
+        form.addWidget(QLabel("主机:"), 0, 0)
+        form.addWidget(self.pg_host_input, 0, 1)
+        form.addWidget(QLabel("端口:"), 0, 2)
+        form.addWidget(self.pg_port_input, 0, 3)
+        form.addWidget(QLabel("数据库:"), 1, 0)
+        form.addWidget(self.pg_db_input, 1, 1)
+        form.addWidget(QLabel("用户:"), 1, 2)
+        form.addWidget(self.pg_user_input, 1, 3)
+        form.addWidget(QLabel("密码:"), 2, 0)
+        form.addWidget(self.pg_pwd_input, 2, 1, 1, 3)
+        conn_group.setLayout(form)
+        outer.addWidget(conn_group)
+
+        # ---- 连接操作按钮 ----
+        btn_row = QHBoxLayout()
+        test_btn = QPushButton("🔍 测试连接")
+        test_btn.clicked.connect(self._test_pg_connection)
+        btn_row.addWidget(test_btn)
+        init_btn = QPushButton("🛠️ 初始化表")
+        init_btn.clicked.connect(self._init_pg_schema)
+        btn_row.addWidget(init_btn)
+        save_btn = QPushButton("💾 保存连接")
+        save_btn.clicked.connect(self._save_pg_settings)
+        btn_row.addWidget(save_btn)
+        btn_row.addStretch()
+        outer.addLayout(btn_row)
+
+        # ---- 查询本地数据 ----
+        query_group = QGroupBox("🔎 查询本地数据（按坐标）")
+        q = QVBoxLayout()
+        qrow = QHBoxLayout()
+        qrow.addWidget(QLabel("经度:"))
+        self.pg_q_lon = QLineEdit()
+        qrow.addWidget(self.pg_q_lon)
+        qrow.addWidget(QLabel("纬度:"))
+        self.pg_q_lat = QLineEdit()
+        qrow.addWidget(self.pg_q_lat)
+        qrow.addWidget(QLabel("半径(m):"))
+        self.pg_q_radius = QSpinBox()
+        self.pg_q_radius.setRange(100, 50000)
+        self.pg_q_radius.setValue(1000)
+        qrow.addWidget(self.pg_q_radius)
+        q.addLayout(qrow)
+
+        qbtn_row = QHBoxLayout()
+        fill_btn = QPushButton("用表格第一行坐标")
+        fill_btn.clicked.connect(self._fill_query_from_table)
+        qbtn_row.addWidget(fill_btn)
+        query_btn = QPushButton("🔎 查询")
+        query_btn.clicked.connect(self._query_local_data)
+        qbtn_row.addWidget(query_btn)
+        qbtn_row.addStretch()
+        q.addLayout(qbtn_row)
+
+        self.pg_result_label = QLabel("")
+        self.pg_result_label.setStyleSheet("color: #666; font-size: 11px;")
+        q.addWidget(self.pg_result_label)
+
+        self.pg_result_table = QTableWidget(0, 5)
+        self.pg_result_table.setHorizontalHeaderLabels(
+            ["类型", "来源", "指标", "值", "时间"]
+        )
+        self.pg_result_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        q.addWidget(self.pg_result_table)
+        query_group.setLayout(q)
+        outer.addWidget(query_group)
+
+        # ---- 导入导师数据 ----
+        import_group = QGroupBox("📥 导入导师数据 (CSV)")
+        il = QVBoxLayout()
+        ir = QHBoxLayout()
+        import_btn = QPushButton("📥 选择 CSV 导入")
+        import_btn.clicked.connect(self._import_local_csv)
+        ir.addWidget(import_btn)
+        refresh_btn = QPushButton("🔄 刷新")
+        refresh_btn.clicked.connect(self._refresh_datasets)
+        ir.addWidget(refresh_btn)
+        ir.addStretch()
+        il.addLayout(ir)
+        self.pg_dataset_list = QListWidget()
+        self.pg_dataset_list.itemClicked.connect(self._on_dataset_clicked)
+        il.addWidget(self.pg_dataset_list)
+        import_group.setLayout(il)
+        outer.addWidget(import_group)
+
+        return panel
+
+    def _get_pg_store(self):
+        """按界面连接参数构建/配置 PostgresStore 单例。"""
+        from pg_store import get_store
+        try:
+            port = int(self.pg_port_input.text().strip())
+        except ValueError:
+            port = PG_PORT
+        return get_store(
+            host=self.pg_host_input.text().strip() or PG_HOST,
+            port=port,
+            dbname=self.pg_db_input.text().strip() or PG_DBNAME,
+            user=self.pg_user_input.text().strip() or PG_USER,
+            password=self.pg_pwd_input.text() or PG_PASSWORD,
+        )
+
+    def _save_pg_settings(self):
+        self.settings.setValue("pg/host", self.pg_host_input.text().strip())
+        self.settings.setValue("pg/port", self.pg_port_input.text().strip())
+        self.settings.setValue("pg/dbname", self.pg_db_input.text().strip())
+        self.settings.setValue("pg/user", self.pg_user_input.text().strip())
+        self.settings.setValue(
+            "pg/password", secure_store("pg_pwd", self.pg_pwd_input.text())
+        )
+        self.settings.sync()
+        self.log_box.append("🔌 PostgreSQL 连接设置已保存")
+
+    def _test_pg_connection(self):
+        try:
+            store = self._get_pg_store()
+            if store.is_available():
+                QMessageBox.information(self, "连接成功", "✅ PostgreSQL 连接成功")
+                self.log_box.append("✅ PostgreSQL 连接成功")
+            else:
+                QMessageBox.warning(
+                    self, "连接失败",
+                    "❌ 无法连接 PostgreSQL\n\n请确认服务已启动（双击 scripts/pg_start.bat）",
+                )
+        except Exception as e:
+            QMessageBox.warning(self, "连接失败", f"❌ 连接异常: {e}")
+
+    def _init_pg_schema(self):
+        try:
+            store = self._get_pg_store()
+            ok, err = store.init_schema()
+            if ok:
+                QMessageBox.information(self, "成功", "✅ 表结构已初始化（6 张表）")
+                self.log_box.append("✅ PostgreSQL 表结构已初始化")
+            else:
+                QMessageBox.warning(self, "失败", f"❌ 初始化失败: {err}")
+        except Exception as e:
+            QMessageBox.warning(self, "失败", f"❌ 初始化异常: {e}")
+
+    def _fill_query_from_table(self):
+        if self.table.rowCount() == 0:
+            return
+        try:
+            self.pg_q_lon.setText(self.table.item(0, 0).text())
+            self.pg_q_lat.setText(self.table.item(0, 1).text())
+        except AttributeError:
+            pass
+
+    def _add_result_row(self, type_, source, metric, value, time_):
+        r = self.pg_result_table.rowCount()
+        self.pg_result_table.insertRow(r)
+        self.pg_result_table.setItem(r, 0, QTableWidgetItem(type_))
+        self.pg_result_table.setItem(r, 1, QTableWidgetItem(str(source)))
+        self.pg_result_table.setItem(r, 2, QTableWidgetItem(str(metric)))
+        self.pg_result_table.setItem(r, 3, QTableWidgetItem(str(value)))
+        self.pg_result_table.setItem(r, 4, QTableWidgetItem(str(time_)))
+
+    def _query_local_data(self):
+        try:
+            lon = float(self.pg_q_lon.text().strip())
+            lat = float(self.pg_q_lat.text().strip())
+        except ValueError:
+            QMessageBox.warning(self, "错误", "请输入有效的经纬度")
+            return
+        radius = self.pg_q_radius.value()
+        try:
+            result = self._get_pg_store().query_local(lon, lat, radius)
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"查询失败: {e}")
+            return
+
+        self.pg_result_label.setText(
+            f"📊 历史采集 {len(result['runs'])} 次 | "
+            f"指标 {len(result['metrics'])} 条 | "
+            f"导师数据 {len(result['local_records'])} 条"
+        )
+        self.pg_result_table.setRowCount(0)
+        for m in result["metrics"][:500]:
+            self._add_result_row(
+                "指标", m.get("source", ""), m.get("metric", ""),
+                m.get("value", ""), m.get("obs_time") or "",
+            )
+        for rec in result["local_records"][:200]:
+            payload = rec.get("payload", {})
+            summary = (json.dumps(payload, ensure_ascii=False)[:80]
+                       if isinstance(payload, dict) else str(payload))
+            self._add_result_row(
+                "导师数据", f"数据集{rec.get('dataset_id', '')}", summary,
+                "", rec.get("obs_time") or "",
+            )
+
+    def _import_local_csv(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择 CSV 文件", "", "CSV Files (*.csv)"
+        )
+        if not file_path:
+            return
+        name, ok = QInputDialog.getText(self, "数据集名称", "输入数据集名称:")
+        if not ok or not name.strip():
+            return
+        try:
+            dataset_id, count = self._get_pg_store().import_csv(
+                file_path, name.strip(), source="导师提供",
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"导入失败: {e}")
+            return
+        if dataset_id is None:
+            QMessageBox.warning(self, "错误", "导入失败：请确认 CSV 可读且 PostgreSQL 已连接")
+            return
+        self.log_box.append(f"📥 已导入导师数据「{name.strip()}」: {count} 条")
+        self._refresh_datasets()
+
+    def _refresh_datasets(self):
+        self.pg_dataset_list.clear()
+        try:
+            for d in self._get_pg_store().list_datasets():
+                item = QListWidgetItem(
+                    f"{d['name']} — {d['record_count']} 条 "
+                    f"({d.get('imported_at', '')})"
+                )
+                item.setData(Qt.ItemDataRole.UserRole, d["id"])
+                self.pg_dataset_list.addItem(item)
+        except Exception:
+            pass
+
+    def _on_dataset_clicked(self, item):
+        dataset_id = item.data(Qt.ItemDataRole.UserRole)
+        try:
+            records = self._get_pg_store().query_dataset(dataset_id)
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"查询失败: {e}")
+            return
+        self.pg_result_table.setRowCount(0)
+        for rec in records:
+            payload = rec.get("payload", {})
+            summary = (json.dumps(payload, ensure_ascii=False)[:80]
+                       if isinstance(payload, dict) else str(payload))
+            self._add_result_row(
+                "导师数据", f"数据集{dataset_id}", summary,
+                rec.get("lon") if rec.get("lon") is not None else "",
+                rec.get("obs_time") or "",
+            )
+        self.pg_result_label.setText(f"📥 数据集 {dataset_id} 共 {len(records)} 条记录")
 
     # ==================== 生命周期 ====================
 

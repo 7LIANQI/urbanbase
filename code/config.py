@@ -29,3 +29,10 @@ POLLUTANT_NAMES = {
     "pm10": "PM10",
     "nh3":  "NH3 (氨气)",
 }
+
+# ---------- PostgreSQL 本地库 ----------
+PG_HOST = "localhost"
+PG_PORT = 5432
+PG_DBNAME = "urban_analysis"
+PG_USER = "postgres"
+PG_PASSWORD = "postgres"   # 本地开发默认密码（仅监听本机），多人共享时请修改
