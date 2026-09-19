@@ -36,3 +36,8 @@ PG_PORT = 5432
 PG_DBNAME = "urban_analysis"
 PG_USER = "postgres"
 PG_PASSWORD = "postgres"   # 本地开发默认密码（仅监听本机），多人共享时请修改
+
+# ---------- PostgreSQL 便携版二进制路径（与 scripts/*.bat 保持一致） ----------
+PG_BIN_DIR = r"D:\PostgreSQL17\pgsql\bin"
+PG_DATA_DIR = r"D:\PostgreSQL17\data"
+PG_LOG_PATH = r"D:\PostgreSQL17\pg.log"

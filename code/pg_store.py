@@ -20,6 +20,7 @@ from psycopg.types.json import Jsonb
 
 from config import (
     PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD,
+    PG_BIN_DIR, PG_DATA_DIR, PG_LOG_PATH,
 )
 
 
@@ -113,10 +114,73 @@ def _is_number(v):
 
 
 def _as_float(v):
+    """转 float，非数值或 NaN/inf 返回 None。"""
     try:
-        return float(v)
+        f = float(v)
     except (ValueError, TypeError):
         return None
+    if math.isnan(f) or math.isinf(f):
+        return None
+    return f
+
+
+def _parse_coord(v):
+    """把各种写法的经纬度转成 float，带单位/度分秒/全角符号都兼容。
+
+    支持：
+      - "116.39"、116.39
+      - "116.39°E"、"39.90°N"
+      - "116°23'28\\"E"（度分秒）
+      - "39度54分30秒"
+      - "73.98W"（西经/南纬 → 负数）
+
+    返回 None 表示无法解析（例如 "116.39,39.90" 挤在一列）。
+    """
+    import re
+
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        f = float(v)
+        return None if (math.isnan(f) or math.isinf(f)) else f
+
+    s = str(v).strip()
+    if not s:
+        return None
+
+    upper = s.upper()
+    neg = ("W" in upper) or ("S" in upper) or ("西" in s) or ("南" in s)
+
+    # 是否含度分秒分隔符（决定是否按度分秒解析）
+    has_dms = any(m in s for m in ("°", "º", "′", "″", "'", '"', "度", "分", "秒"))
+
+    # 去掉单位/符号，把度分秒分隔符统一成空格
+    cleaned = (s.replace("°", " ").replace("º", " ")
+                 .replace("′", " ").replace("″", " ")
+                 .replace("'", " ").replace('"', " ")
+                 .replace("度", " ").replace("分", " ").replace("秒", " "))
+    # 只保留数字、点、负号、空格
+    cleaned = re.sub(r"[^0-9.\-\s]", " ", cleaned)
+    parts = cleaned.split()
+    if not parts:
+        return None
+    try:
+        deg = float(parts[0])
+    except ValueError:
+        return None
+
+    if not has_dms:
+        # 无度分秒符号时只认单个数字，避免把 "116.39,39.90" 误当成分秒
+        if len(parts) != 1:
+            return None
+        return -abs(deg) if (neg or deg < 0) else abs(deg)
+
+    minutes = float(parts[1]) if len(parts) > 1 else 0.0
+    seconds = float(parts[2]) if len(parts) > 2 else 0.0
+    val = abs(deg) + minutes / 60.0 + seconds / 3600.0
+    if deg < 0 or neg:
+        val = -val
+    return val
 
 
 def _parse_date(v):
@@ -128,7 +192,14 @@ def _parse_date(v):
     s = str(v).strip()
     if not s:
         return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"):
+    # ISO8601 带毫秒/时区（如 2026-09-01T12:34:56.789Z）→ 去掉毫秒与 Z
+    if "T" in s:
+        s = s.split(".")[0].rstrip("Z").rstrip("z")
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d",
+        "%Y%m%d",
+    ):
         try:
             return datetime.strptime(s, fmt)
         except ValueError:
@@ -157,6 +228,167 @@ def _json_safe(obj):
         except Exception:
             return str(obj)
     return str(obj)
+
+
+# ==================== 文件读取 / 列识别 / 距离工具 ====================
+
+# 时间列的常见关键词（用于自动识别）
+TIME_HINTS = ("日期", "时间", "date", "time", "datetime")
+
+
+def _haversine_m(lon1, lat1, lon2, lat2):
+    """两个经纬度点间的球面距离（米），Haversine 简化版。"""
+    rlat1, rlon1 = math.radians(lat1), math.radians(lon1)
+    rlat2, rlon2 = math.radians(lat2), math.radians(lon2)
+    dlat, dlon = rlat2 - rlat1, rlon2 - rlon1
+    a = (math.sin(dlat / 2) ** 2 +
+         math.cos(rlat1) * math.cos(rlat2) * math.sin(dlon / 2) ** 2)
+    return 6371000.0 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _radius_bounds(lon, lat, radius):
+    """按半径生成经纬度包围盒，考虑纬度对经度距离的影响。
+
+    Returns:
+        (lon_min, lon_max, lat_min, lat_max)
+    """
+    lat_delta = radius / 110540.0
+    cos_lat = max(math.cos(math.radians(lat)), 0.01)  # 高纬保护
+    lon_delta = radius / (111320.0 * cos_lat)
+    return (lon - lon_delta, lon + lon_delta, lat - lat_delta, lat + lat_delta)
+
+
+def _geom_first_point(geom):
+    """从 GeoJSON geometry 提取第一个坐标点作为代表点 (lon, lat)。"""
+    if not isinstance(geom, dict):
+        return None, None
+    coords = geom.get("coordinates")
+    gtype = geom.get("type")
+    if not isinstance(coords, (list, tuple)) or not coords:
+        return None, None
+    if gtype == "Point" and len(coords) >= 2:
+        return _as_float(coords[0]), _as_float(coords[1])
+    if gtype in ("LineString", "MultiPoint"):
+        pt = coords[0]
+        if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+            return _as_float(pt[0]), _as_float(pt[1])
+    if gtype == "Polygon":
+        ring = coords[0]
+        if (isinstance(ring, (list, tuple)) and ring
+                and isinstance(ring[0], (list, tuple)) and len(ring[0]) >= 2):
+            return _as_float(ring[0][0]), _as_float(ring[0][1])
+    return None, None
+
+
+def _find_time_in_props(props):
+    """从 GeoJSON properties 里找常见时间字段并解析为 datetime。"""
+    if not isinstance(props, dict):
+        return None
+    for k, v in props.items():
+        if any(hint in str(k).lower() for hint in TIME_HINTS):
+            obs = _parse_date(v)
+            if obs is not None:
+                return obs
+    return None
+
+
+def _detect_encoding(path):
+    """探测文本文件编码：优先 UTF-8（含 BOM），回退 GB18030/GBK。"""
+    for enc in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
+        try:
+            with open(path, "r", encoding=enc) as f:
+                f.read(65536)
+            return enc
+        except (UnicodeDecodeError, OSError):
+            continue
+    return "utf-8"
+
+
+def _detect_delimiter(path, encoding):
+    """在表头行探测 CSV 分隔符（逗号/分号/Tab/竖线）。"""
+    try:
+        with open(path, "r", encoding=encoding) as f:
+            header = f.readline()
+    except (OSError, UnicodeDecodeError):
+        return ","
+    counts = {sep: header.count(sep) for sep in (",", ";", "\t", "|")}
+    best = max(counts, key=counts.get)
+    return best if counts[best] > 0 else ","
+
+
+def read_table(path):
+    """读取 CSV / Excel 文件为 pandas DataFrame（自动探测编码与分隔符）。"""
+    import pandas as pd
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".xlsx", ".xlsm", ".xls"):
+        return pd.read_excel(path)
+    enc = _detect_encoding(path)
+    sep = _detect_delimiter(path, enc)
+    return pd.read_csv(path, encoding=enc, sep=sep)
+
+
+def detect_columns(df):
+    """自动识别 DataFrame 中的经度/纬度/时间列（模糊匹配）。
+
+    按"包含关键词"匹配，并排除歧义列（如「经纬度」同时含经纬度则都不算）。
+    Returns:
+        (lon_col, lat_col, time_col)，识别不到返回 None。
+    """
+    cols = [str(c) for c in df.columns]
+    lowered = [c.strip().lower() for c in cols]
+
+    def find(positive, negative):
+        for c, cl in zip(cols, lowered):
+            if any(p in cl for p in positive) and not any(n in cl for n in negative):
+                return c
+        return None
+
+    # 「经纬度」「坐标」等组合列名同时含经纬语义，都不应被单独匹配
+    combined = ("经纬", "坐标", "coord")
+    lon_col = find(
+        ("lon", "lng", "long", "经度", "东经"),
+        ("lat", "纬度", "北纬") + combined,
+    )
+    lat_col = find(
+        ("lat", "纬度", "北纬"),
+        ("lon", "lng", "long", "经度", "东经") + combined,
+    )
+    time_col = next(
+        (c for c, cl in zip(cols, lowered) if any(k in cl for k in TIME_HINTS)),
+        None,
+    )
+    return lon_col, lat_col, time_col
+
+
+def read_points_txt(path):
+    """读取 TXT 点位列表（每行一个点，lon,lat，逗号/空白/分号分隔）。
+
+    返回 DataFrame（列名 lon, lat, col2, col3...），无有效点返回空 DataFrame。
+    """
+    import re
+
+    import pandas as pd
+
+    enc = _detect_encoding(path)
+    rows = []
+    with open(path, "r", encoding=enc) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p for p in re.split(r"[,\s;]+", line) if p]
+            if len(parts) < 2:
+                continue
+            rows.append(parts)
+
+    if not rows:
+        return pd.DataFrame()
+
+    ncol = max(len(r) for r in rows)
+    for r in rows:
+        r.extend([""] * (ncol - len(r)))
+    cols = ["lon", "lat"] + [f"col{i}" for i in range(2, ncol)]
+    return pd.DataFrame(rows, columns=cols)
 
 
 class PostgresStore:
@@ -204,6 +436,39 @@ class PostgresStore:
             return True
         except Exception:
             return False
+
+    def start_server(self):
+        """启动便携版 PostgreSQL 服务（调用 pg_ctl start）。
+
+        Returns:
+            (成功, 消息)。
+        """
+        import subprocess
+
+        if self.is_available():
+            return True, "PostgreSQL 已在运行，无需重复启动"
+
+        pg_ctl = os.path.join(PG_BIN_DIR, "pg_ctl.exe")
+        if not os.path.exists(pg_ctl):
+            return False, f"未找到 pg_ctl.exe（{PG_BIN_DIR}）"
+        if not os.path.exists(PG_DATA_DIR):
+            return False, "数据目录不存在，请先运行 scripts/pg_init.bat 初始化"
+
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            proc = subprocess.run(
+                [pg_ctl, "-D", PG_DATA_DIR, "-l", PG_LOG_PATH, "start"],
+                capture_output=True, timeout=60, creationflags=creationflags,
+            )
+        except Exception as e:
+            return False, f"启动进程出错: {e}"
+
+        if self.is_available():
+            return True, "PostgreSQL 已启动，可以正常使用本地数据了"
+
+        out = (proc.stdout + proc.stderr).decode("gbk", errors="replace").strip()
+        detail = out[:200] or "未知错误"
+        return False, f"启动未成功：{detail}"
 
     def ensure_database(self):
         """若目标库不存在则创建（连接维护库 postgres）。返回 True 表示库可用。"""
@@ -479,11 +744,12 @@ class PostgresStore:
         return out
 
     def query_local(self, lon, lat, radius, start_date=None, end_date=None):
-        """按位置/时间查询本地库，返回 dict（供 LocalDataCollector 用）。"""
+        """按位置/时间查询本地库，返回 dict（供 LocalDataCollector 用）。
+
+        local_records 按真实球面距离过滤并按距离升序返回（自带 distance_m）。
+        """
         result = {"runs": [], "metrics": [], "spatial": [], "local_records": []}
-        delta = radius / 111000.0
-        lon0, lon1 = round(lon, 6) - delta, round(lon, 6) + delta
-        lat0, lat1 = round(lat, 6) - delta, round(lat, 6) + delta
+        lon0, lon1, lat0, lat1 = _radius_bounds(lon, lat, radius)
 
         conn = self._get_conn()
         try:
@@ -521,13 +787,31 @@ class PostgresStore:
                     )
                     result["spatial"] = [self._row_serializable(r) for r in cur.fetchall()]
 
+                # 自有数据集：Haversine 距离过滤 + 按距离升序（最近优先）
+                haversine_a = (
+                    "power(sin(radians(lat - %s) / 2), 2)"
+                    " + cos(radians(%s)) * cos(radians(lat))"
+                    " * power(sin(radians(lon - %s) / 2), 2)"
+                )
+                dist_expr = (
+                    f"6371000.0 * 2 * atan2(sqrt({haversine_a}), "
+                    f"sqrt(1 - ({haversine_a})))"
+                )
                 cur.execute(
-                    """SELECT id, dataset_id, lon, lat, obs_time, payload
-                       FROM local_records
-                       WHERE lon BETWEEN %s AND %s AND lat BETWEEN %s AND %s
-                       ORDER BY obs_time DESC NULLS LAST
-                       LIMIT 1000""",
-                    (lon0, lon1, lat0, lat1),
+                    f"""
+                    SELECT id, dataset_id, lon, lat, obs_time, payload, distance_m
+                    FROM (
+                        SELECT id, dataset_id, lon, lat, obs_time, payload,
+                               {dist_expr} AS distance_m
+                        FROM local_records
+                        WHERE lon BETWEEN %s AND %s AND lat BETWEEN %s AND %s
+                    ) _t
+                    WHERE distance_m <= %s
+                    ORDER BY distance_m ASC
+                    LIMIT 1000
+                    """,
+                    (lat, lat, lon, lat, lat, lon,
+                     lon0, lon1, lat0, lat1, radius),
                 )
                 result["local_records"] = [
                     self._row_serializable(r) for r in cur.fetchall()
@@ -570,25 +854,19 @@ class PostgresStore:
 
     # ==================== 导入导师数据 ====================
 
-    def import_csv(self, path, name, description="", source=""):
-        """导入 CSV 到本地库，自动识别坐标/时间列。返回 (dataset_id, 记录数)。"""
-        try:
-            import pandas as pd
-        except ImportError:
-            return None, 0
-        try:
-            df = pd.read_csv(path)
-        except Exception:
-            return None, 0
-        if df.empty:
-            return None, 0
+    def import_dataframe(self, df, name, description="", source="",
+                         lon_col=None, lat_col=None, time_col=None):
+        """把 DataFrame 导入本地库（批量插入）。
 
-        lon_col = next((c for c in df.columns
-                        if str(c).lower() in ("lon", "lng", "longitude", "经度")), None)
-        lat_col = next((c for c in df.columns
-                        if str(c).lower() in ("lat", "latitude", "纬度")), None)
-        time_col = next((c for c in df.columns
-                         if any(k in str(c) for k in ("日期", "date", "时间", "time"))), None)
+        Args:
+            lon_col / lat_col / time_col: 显式指定坐标/时间列名。
+                经度/纬度列为 None 时对应记录存为 NULL，无法按坐标查询。
+
+        Returns:
+            (dataset_id, 记录数, 含有效经纬度的记录数)；失败返回 (None, 0, 0)。
+        """
+        if df is None or df.empty:
+            return None, 0, 0
 
         conn = self._get_conn()
         try:
@@ -600,26 +878,108 @@ class PostgresStore:
                 )
                 dataset_id = cur.fetchone()["id"]
 
-                count = 0
+                rows = []
+                with_coords = 0
                 for _, row in df.iterrows():
                     payload = _json_safe({str(k): v for k, v in row.items()})
-                    lon_v = _as_float(row[lon_col]) if lon_col else None
-                    lat_v = _as_float(row[lat_col]) if lat_col else None
+                    lon_v = _parse_coord(row[lon_col]) if lon_col else None
+                    lat_v = _parse_coord(row[lat_col]) if lat_col else None
                     obs = _parse_date(row[time_col]) if time_col else None
-                    cur.execute(
+                    if lon_v is not None and lat_v is not None:
+                        with_coords += 1
+                    rows.append((dataset_id, lon_v, lat_v, obs, Jsonb(payload)))
+
+                if rows:
+                    cur.executemany(
                         """INSERT INTO local_records
                            (dataset_id, lon, lat, obs_time, payload)
                            VALUES (%s, %s, %s, %s, %s)""",
-                        (dataset_id, lon_v, lat_v, obs, Jsonb(payload)),
+                        rows,
                     )
-                    count += 1
             conn.commit()
-            return dataset_id, count
+            return dataset_id, len(rows), with_coords
         except Exception:
             conn.rollback()
-            return None, 0
+            return None, 0, 0
         finally:
             conn.close()
+
+    def import_geojson(self, path, name, description="", source=""):
+        """导入 GeoJSON（FeatureCollection）到本地库。
+
+        每个 Feature 的坐标取第一个点作为代表 lon/lat，properties 作为 payload。
+        Returns: (dataset_id, 记录数, 含有效经纬度的记录数)；失败返回 (None, 0, 0)。
+        """
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None, 0, 0
+
+        features = obj.get("features", []) if isinstance(obj, dict) else []
+        if not features:
+            return None, 0, 0
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO local_datasets (name, description, source)
+                       VALUES (%s, %s, %s) RETURNING id""",
+                    (name, description, source),
+                )
+                dataset_id = cur.fetchone()["id"]
+
+                rows = []
+                with_coords = 0
+                for feat in features:
+                    if not isinstance(feat, dict):
+                        continue
+                    geom = feat.get("geometry")
+                    props = feat.get("properties")
+                    lon_v, lat_v = _geom_first_point(geom)
+                    obs = _find_time_in_props(props)
+                    if lon_v is not None and lat_v is not None:
+                        with_coords += 1
+                    payload = _json_safe(
+                        props if isinstance(props, dict) else {"properties": props}
+                    )
+                    rows.append((dataset_id, lon_v, lat_v, obs, Jsonb(payload)))
+
+                if rows:
+                    cur.executemany(
+                        """INSERT INTO local_records
+                           (dataset_id, lon, lat, obs_time, payload)
+                           VALUES (%s, %s, %s, %s, %s)""",
+                        rows,
+                    )
+            conn.commit()
+            return dataset_id, len(rows), with_coords
+        except Exception:
+            conn.rollback()
+            return None, 0, 0
+        finally:
+            conn.close()
+
+    def import_csv(self, path, name, description="", source="",
+                   lon_col=None, lat_col=None, time_col=None):
+        """导入 CSV / Excel 到本地库（自动识别坐标/时间列，亦可显式指定）。
+
+        Returns: (dataset_id, 记录数, 含有效经纬度的记录数)；失败返回 (None, 0, 0)。
+        """
+        try:
+            df = read_table(path)
+        except Exception:
+            return None, 0, 0
+        if lon_col is None or lat_col is None:
+            auto_lon, auto_lat, auto_time = detect_columns(df)
+            lon_col = lon_col or auto_lon
+            lat_col = lat_col or auto_lat
+            time_col = time_col or auto_time
+        return self.import_dataframe(
+            df, name, description, source,
+            lon_col=lon_col, lat_col=lat_col, time_col=time_col,
+        )
 
 
 # ==================== 模块级便捷接口 ====================

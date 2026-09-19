@@ -120,6 +120,70 @@ class ResultDialog(QDialog):
         layout.addLayout(bottom)
 
 
+class ColumnMappingDialog(QDialog):
+    """导入数据时手动指定经度/纬度/时间列的对话框。"""
+
+    def __init__(self, columns, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("指定坐标列")
+        layout = QVBoxLayout(self)
+
+        tip = QLabel("未能自动识别坐标列，请手动指定（时间列可选）：")
+        layout.addWidget(tip)
+
+        form = QGridLayout()
+        self.lon_combo = self._make_combo(columns)
+        self.lat_combo = self._make_combo(columns)
+        self.time_combo = self._make_combo(columns, allow_none=True)
+        form.addWidget(QLabel("经度列:"), 0, 0)
+        form.addWidget(self.lon_combo, 0, 1)
+        form.addWidget(QLabel("纬度列:"), 1, 0)
+        form.addWidget(self.lat_combo, 1, 1)
+        form.addWidget(QLabel("时间列(可选):"), 2, 0)
+        form.addWidget(self.time_combo, 2, 1)
+        layout.addLayout(form)
+
+        btns = QHBoxLayout()
+        ok_btn = QPushButton("确定")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        btns.addStretch()
+        btns.addWidget(ok_btn)
+        btns.addWidget(cancel_btn)
+        layout.addLayout(btns)
+
+    @staticmethod
+    def _make_combo(columns, allow_none=False):
+        combo = QComboBox()
+        if allow_none:
+            combo.addItem("（无）", None)
+        for c in columns:
+            combo.addItem(str(c), str(c))
+        return combo
+
+    def selection(self):
+        """返回 (lon_col, lat_col, time_col)。"""
+        return (
+            self.lon_combo.currentData(),
+            self.lat_combo.currentData(),
+            self.time_combo.currentData(),
+        )
+
+
+# 载荷展开时跳过的坐标列（避免与 lon/lat/距离重复展示）
+_COORD_KEYS = {"lon", "lng", "longitude", "long", "latitude", "lat", "经度", "纬度"}
+
+
+def _fmt_cell(v):
+    """把任意值格式化为表格可显示的字符串。"""
+    if v is None:
+        return ""
+    if isinstance(v, (dict, list)):
+        return json.dumps(v, ensure_ascii=False)
+    return str(v)
+
+
 class MainWindow(QWidget):
     """应用主窗口。"""
 
@@ -2321,6 +2385,9 @@ class MainWindow(QWidget):
 
         # ---- 连接操作按钮 ----
         btn_row = QHBoxLayout()
+        start_btn = QPushButton("▶ 启动数据库")
+        start_btn.clicked.connect(self._start_pg_server)
+        btn_row.addWidget(start_btn)
         test_btn = QPushButton("🔍 测试连接")
         test_btn.clicked.connect(self._test_pg_connection)
         btn_row.addWidget(test_btn)
@@ -2376,11 +2443,11 @@ class MainWindow(QWidget):
         outer.addWidget(query_group)
 
         # ---- 导入导师数据 ----
-        import_group = QGroupBox("📥 导入导师数据 (CSV)")
+        import_group = QGroupBox("📥 导入本地数据 (CSV / Excel / GeoJSON)")
         il = QVBoxLayout()
         ir = QHBoxLayout()
-        import_btn = QPushButton("📥 选择 CSV 导入")
-        import_btn.clicked.connect(self._import_local_csv)
+        import_btn = QPushButton("📥 选择文件导入")
+        import_btn.clicked.connect(self._import_local_file)
         ir.addWidget(import_btn)
         refresh_btn = QPushButton("🔄 刷新")
         refresh_btn.clicked.connect(self._refresh_datasets)
@@ -2420,6 +2487,18 @@ class MainWindow(QWidget):
         )
         self.settings.sync()
         self.log_box.append("🔌 PostgreSQL 连接设置已保存")
+
+    def _start_pg_server(self):
+        """启动便携版 PostgreSQL 服务。"""
+        try:
+            ok, msg = self._get_pg_store().start_server()
+        except Exception as e:
+            ok, msg = False, str(e)
+        if ok:
+            QMessageBox.information(self, "启动成功", f"✅ {msg}")
+            self.log_box.append(f"✅ {msg}")
+        else:
+            QMessageBox.warning(self, "启动失败", f"❌ {msg}")
 
     def _test_pg_connection(self):
         try:
@@ -2465,6 +2544,18 @@ class MainWindow(QWidget):
         self.pg_result_table.setItem(r, 3, QTableWidgetItem(str(value)))
         self.pg_result_table.setItem(r, 4, QTableWidgetItem(str(time_)))
 
+    def _append_record_rows(self, src, payload, obs="", dist=None):
+        """把一条自有数据记录展开成多行（距离 + 各字段）。"""
+        if dist is not None:
+            self._add_result_row("自有数据", src, "距离(m)", round(dist, 1), obs)
+        if isinstance(payload, dict):
+            for k, v in payload.items():
+                if str(k).strip().lower() in _COORD_KEYS:
+                    continue
+                self._add_result_row("自有数据", src, str(k), _fmt_cell(v), obs)
+        elif payload is not None:
+            self._add_result_row("自有数据", src, "payload", _fmt_cell(payload), obs)
+
     def _query_local_data(self):
         try:
             lon = float(self.pg_q_lon.text().strip())
@@ -2479,46 +2570,100 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "错误", f"查询失败: {e}")
             return
 
-        self.pg_result_label.setText(
+        name_map = {}
+        try:
+            for d in self._get_pg_store().list_datasets():
+                name_map[d["id"]] = d["name"]
+        except Exception:
+            pass
+
+        n_records = len(result["local_records"])
+        label = (
             f"📊 历史采集 {len(result['runs'])} 次 | "
             f"指标 {len(result['metrics'])} 条 | "
-            f"导师数据 {len(result['local_records'])} 条"
+            f"自有数据 {n_records} 条"
         )
         self.pg_result_table.setRowCount(0)
+
         for m in result["metrics"][:500]:
             self._add_result_row(
                 "指标", m.get("source", ""), m.get("metric", ""),
                 m.get("value", ""), m.get("obs_time") or "",
             )
-        for rec in result["local_records"][:200]:
-            payload = rec.get("payload", {})
-            summary = (json.dumps(payload, ensure_ascii=False)[:80]
-                       if isinstance(payload, dict) else str(payload))
-            self._add_result_row(
-                "导师数据", f"数据集{rec.get('dataset_id', '')}", summary,
-                "", rec.get("obs_time") or "",
+
+        for rec in result["local_records"][:300]:
+            ds_id = rec.get("dataset_id")
+            src = name_map.get(ds_id, f"数据集{ds_id}")
+            self._append_record_rows(
+                src, rec.get("payload", {}),
+                obs=rec.get("obs_time") or "",
+                dist=rec.get("distance_m"),
             )
 
-    def _import_local_csv(self):
+        if n_records > 300:
+            label += "（仅显示前 300 条，按距离由近到远）"
+        self.pg_result_label.setText(label)
+
+    def _import_local_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择 CSV 文件", "", "CSV Files (*.csv)"
+            self, "选择数据文件", "",
+            "数据文件 (*.csv *.txt *.xlsx *.xlsm *.xls *.geojson *.json);;"
+            "CSV (*.csv);;TXT 点位 (*.txt);;Excel (*.xlsx *.xlsm *.xls);;"
+            "GeoJSON (*.geojson *.json)",
         )
         if not file_path:
             return
         name, ok = QInputDialog.getText(self, "数据集名称", "输入数据集名称:")
         if not ok or not name.strip():
             return
+        name = name.strip()
+
+        store = self._get_pg_store()
+        ext = os.path.splitext(file_path)[1].lower()
         try:
-            dataset_id, count = self._get_pg_store().import_csv(
-                file_path, name.strip(), source="导师提供",
-            )
+            if ext in (".geojson", ".json"):
+                dataset_id, count, with_coords = store.import_geojson(
+                    file_path, name, source="用户上传",
+                )
+            elif ext == ".txt":
+                from pg_store import read_points_txt
+                df = read_points_txt(file_path)
+                if df.empty:
+                    QMessageBox.warning(self, "错误", "未从 TXT 中解析出任何点位")
+                    return
+                dataset_id, count, with_coords = store.import_dataframe(
+                    df, name, source="用户上传", lon_col="lon", lat_col="lat",
+                )
+            else:
+                from pg_store import read_table, detect_columns
+                df = read_table(file_path)
+                lon_col, lat_col, time_col = detect_columns(df)
+                if lon_col is None or lat_col is None:
+                    dlg = ColumnMappingDialog(list(df.columns), self)
+                    if not dlg.exec():
+                        return
+                    lon_col, lat_col, time_col = dlg.selection()
+                    if lon_col is None or lat_col is None:
+                        QMessageBox.warning(self, "错误", "请指定经度列和纬度列")
+                        return
+                dataset_id, count, with_coords = store.import_dataframe(
+                    df, name, source="用户上传",
+                    lon_col=lon_col, lat_col=lat_col, time_col=time_col,
+                )
         except Exception as e:
             QMessageBox.warning(self, "错误", f"导入失败: {e}")
             return
+
         if dataset_id is None:
-            QMessageBox.warning(self, "错误", "导入失败：请确认 CSV 可读且 PostgreSQL 已连接")
+            QMessageBox.warning(
+                self, "错误", "导入失败：请确认文件可读且 PostgreSQL 已连接",
+            )
             return
-        self.log_box.append(f"📥 已导入导师数据「{name.strip()}」: {count} 条")
+
+        msg = f"📥 已导入「{name}」: {count} 条"
+        if with_coords < count:
+            msg += f"（⚠️ {count - with_coords} 条未能识别经纬度，将无法按坐标查询到）"
+        self.log_box.append(msg)
         self._refresh_datasets()
 
     def _refresh_datasets(self):
@@ -2542,16 +2687,13 @@ class MainWindow(QWidget):
             QMessageBox.warning(self, "错误", f"查询失败: {e}")
             return
         self.pg_result_table.setRowCount(0)
+        name = item.text().split(" — ")[0]
         for rec in records:
-            payload = rec.get("payload", {})
-            summary = (json.dumps(payload, ensure_ascii=False)[:80]
-                       if isinstance(payload, dict) else str(payload))
-            self._add_result_row(
-                "导师数据", f"数据集{dataset_id}", summary,
-                rec.get("lon") if rec.get("lon") is not None else "",
-                rec.get("obs_time") or "",
+            self._append_record_rows(
+                name, rec.get("payload", {}),
+                obs=rec.get("obs_time") or "",
             )
-        self.pg_result_label.setText(f"📥 数据集 {dataset_id} 共 {len(records)} 条记录")
+        self.pg_result_label.setText(f"📥 {name} 共 {len(records)} 条记录")
 
     # ==================== 生命周期 ====================
 
