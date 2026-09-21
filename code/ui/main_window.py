@@ -2424,6 +2424,9 @@ class MainWindow(QWidget):
         query_btn = QPushButton("🔎 查询")
         query_btn.clicked.connect(self._query_local_data)
         qbtn_row.addWidget(query_btn)
+        batch_btn = QPushButton("📂 批量查询（导入坐标）")
+        batch_btn.clicked.connect(self._batch_query_local)
+        qbtn_row.addWidget(batch_btn)
         qbtn_row.addStretch()
         q.addLayout(qbtn_row)
 
@@ -2616,6 +2619,83 @@ class MainWindow(QWidget):
                 msg += "（仅显示前 300 条，按距离由近到远）"
             self.pg_result_label.setText(msg)
             self.pg_result_label.setStyleSheet("color: #27ae60; font-size: 13px;")
+
+    def _batch_query_local(self):
+        """批量查询：导入坐标文件，对每个点查询附近本地数据。"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择坐标文件", "",
+            "坐标文件 (*.csv *.txt);;CSV (*.csv);;TXT (*.txt)",
+        )
+        if not file_path:
+            return
+
+        from pg_store import read_points_txt, read_table, detect_columns, _parse_coord
+
+        try:
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext == ".txt":
+                df = read_points_txt(file_path)
+                lon_col, lat_col = "lon", "lat"
+            else:
+                df = read_table(file_path)
+                lon_col, lat_col, _ = detect_columns(df)
+            if df.empty or lon_col is None or lat_col is None:
+                QMessageBox.warning(self, "错误", "未能从文件中识别出经纬度两列")
+                return
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"读取坐标文件失败：{e}")
+            return
+
+        points = []
+        for _, row in df.iterrows():
+            lon = _parse_coord(row[lon_col])
+            lat = _parse_coord(row[lat_col])
+            if lon is not None and lat is not None:
+                points.append((lon, lat))
+        if not points:
+            QMessageBox.warning(self, "错误", "文件里没有有效的经纬度")
+            return
+        if len(points) > 200:
+            QMessageBox.information(
+                self, "提示",
+                f"文件共 {len(points)} 个点，批量查询只处理前 200 个以免卡顿，建议分批导入。",
+            )
+            points = points[:200]
+
+        radius = self.pg_q_radius.value()
+        store = self._get_pg_store()
+        name_map = {}
+        try:
+            for d in store.list_datasets():
+                name_map[d["id"]] = d["name"]
+        except Exception:
+            pass
+
+        self.pg_result_table.setRowCount(0)
+        total_records = 0
+        for lon, lat in points:
+            try:
+                result = store.query_local(lon, lat, radius)
+            except Exception:
+                continue
+            records = result["local_records"]
+            total_records += len(records)
+            self._add_result_row(
+                "📌 查询点", f"经度 {lon}, 纬度 {lat}", "", f"命中 {len(records)} 条", "",
+            )
+            for rec in records[:50]:
+                ds_id = rec.get("dataset_id")
+                src = name_map.get(ds_id, f"数据集{ds_id}")
+                self._append_record_rows(
+                    src, rec.get("payload", {}),
+                    obs=rec.get("obs_time") or "",
+                    dist=rec.get("distance_m"),
+                )
+
+        self.pg_result_label.setText(
+            f"📌 批量查询 {len(points)} 个点，共命中 {total_records} 条数据"
+        )
+        self.pg_result_label.setStyleSheet("color: #27ae60; font-size: 13px;")
 
     def _import_local_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
