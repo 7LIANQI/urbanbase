@@ -2561,13 +2561,17 @@ class MainWindow(QWidget):
             lon = float(self.pg_q_lon.text().strip())
             lat = float(self.pg_q_lat.text().strip())
         except ValueError:
-            QMessageBox.warning(self, "错误", "请输入有效的经纬度")
+            QMessageBox.warning(
+                self, "提示",
+                "请先在「经度」「纬度」两个框里各填一个数字。\n\n"
+                "例如：经度 116.39，纬度 39.90",
+            )
             return
         radius = self.pg_q_radius.value()
         try:
             result = self._get_pg_store().query_local(lon, lat, radius)
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"查询失败: {e}")
+            QMessageBox.warning(self, "查询失败", f"数据库查询失败：\n{e}")
             return
 
         name_map = {}
@@ -2578,11 +2582,6 @@ class MainWindow(QWidget):
             pass
 
         n_records = len(result["local_records"])
-        label = (
-            f"📊 历史采集 {len(result['runs'])} 次 | "
-            f"指标 {len(result['metrics'])} 条 | "
-            f"自有数据 {n_records} 条"
-        )
         self.pg_result_table.setRowCount(0)
 
         for m in result["metrics"][:500]:
@@ -2600,9 +2599,23 @@ class MainWindow(QWidget):
                 dist=rec.get("distance_m"),
             )
 
-        if n_records > 300:
-            label += "（仅显示前 300 条，按距离由近到远）"
-        self.pg_result_label.setText(label)
+        # 结果反馈：有数据绿字、没数据红字，确保点查询一定有可见反馈
+        total = len(result["metrics"]) + n_records
+        if total == 0:
+            self.pg_result_label.setText(
+                f"⚠️ (经度 {lon}, 纬度 {lat}) 半径 {radius}m 内没有找到任何数据"
+            )
+            self.pg_result_label.setStyleSheet("color: #c0392b; font-size: 13px;")
+        else:
+            msg = (
+                f"📊 历史采集 {len(result['runs'])} 次 | "
+                f"指标 {len(result['metrics'])} 条 | "
+                f"自有数据 {n_records} 条"
+            )
+            if n_records > 300:
+                msg += "（仅显示前 300 条，按距离由近到远）"
+            self.pg_result_label.setText(msg)
+            self.pg_result_label.setStyleSheet("color: #27ae60; font-size: 13px;")
 
     def _import_local_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
