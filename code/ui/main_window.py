@@ -2508,6 +2508,9 @@ class MainWindow(QWidget):
         refresh_btn = QPushButton("🔄 刷新")
         refresh_btn.clicked.connect(self._refresh_datasets)
         ir.addWidget(refresh_btn)
+        delete_btn = QPushButton("🗑️ 删除选中")
+        delete_btn.clicked.connect(self._delete_selected_dataset)
+        ir.addWidget(delete_btn)
         ir.addStretch()
         il.addLayout(ir)
         self.pg_dataset_list = QListWidget()
@@ -2894,6 +2897,33 @@ class MainWindow(QWidget):
         self._show_query_result(
             f"数据集：{name}", rows, f"📥 {name} 共 {len(records)} 条记录",
         )
+
+    def _delete_selected_dataset(self):
+        """删除列表里选中的数据集（含其所有记录）。"""
+        item = self.pg_dataset_list.currentItem()
+        if item is None:
+            QMessageBox.warning(self, "提示", "请先在下方列表里选中一个要删除的数据集")
+            return
+        dataset_id = item.data(Qt.ItemDataRole.UserRole)
+        name = item.text().split(" — ")[0]
+        ret = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除数据集「{name}」吗？\n它的所有记录都会被删除，且无法恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            ok, msg = self._get_pg_store().delete_dataset(dataset_id)
+        except Exception as e:
+            ok, msg = False, str(e)
+        if ok:
+            self.log_box.append(f"🗑️ {msg}")
+            self._refresh_datasets()
+            QMessageBox.information(self, "删除成功", f"✅ {msg}")
+        else:
+            QMessageBox.warning(self, "删除失败", f"❌ {msg}")
 
     # ==================== 生命周期 ====================
 

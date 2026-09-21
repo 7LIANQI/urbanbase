@@ -862,6 +862,25 @@ class PostgresStore:
         finally:
             conn.close()
 
+    def delete_dataset(self, dataset_id):
+        """删除一个数据集及其所有记录（级联删除）。返回 (成功, 消息)。"""
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM local_records WHERE dataset_id = %s",
+                    (dataset_id,),
+                )
+                rec_count = cur.fetchone()["count"]
+                cur.execute("DELETE FROM local_datasets WHERE id = %s", (dataset_id,))
+            conn.commit()
+            return True, f"已删除数据集（含 {rec_count} 条记录）"
+        except Exception as e:
+            conn.rollback()
+            return False, str(e)
+        finally:
+            conn.close()
+
     # ==================== 导入导师数据 ====================
 
     def import_dataframe(self, df, name, description="", source="",
