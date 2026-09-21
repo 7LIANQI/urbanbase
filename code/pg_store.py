@@ -745,10 +745,12 @@ class PostgresStore:
                 out[k] = str(v)
         return out
 
-    def query_local(self, lon, lat, radius, start_date=None, end_date=None):
+    def query_local(self, lon, lat, radius, start_date=None, end_date=None,
+                    dataset_ids=None):
         """按位置/时间查询本地库，返回 dict（供 LocalDataCollector 用）。
 
         local_records 按真实球面距离过滤并按距离升序返回（自带 distance_m）。
+        dataset_ids: 可选，仅查询这些数据集的记录（None/空 = 查全部）。
         """
         result = {"runs": [], "metrics": [], "spatial": [], "local_records": []}
         lon0, lon1, lat0, lat1 = _radius_bounds(lon, lat, radius)
@@ -799,6 +801,12 @@ class PostgresStore:
                     f"6371000.0 * 2 * atan2(sqrt({haversine_a}), "
                     f"sqrt(1 - ({haversine_a})))"
                 )
+                ds_filter = ""
+                params = [lat, lat, lon, lat, lat, lon, lon0, lon1, lat0, lat1]
+                if dataset_ids:
+                    ds_filter = " AND dataset_id = ANY(%s)"
+                    params.append(list(dataset_ids))
+                params.append(radius)
                 cur.execute(
                     f"""
                     SELECT id, dataset_id, lon, lat, obs_time, payload, distance_m
@@ -807,13 +815,13 @@ class PostgresStore:
                                {dist_expr} AS distance_m
                         FROM local_records
                         WHERE lon BETWEEN %s AND %s AND lat BETWEEN %s AND %s
+                              {ds_filter}
                     ) _t
                     WHERE distance_m <= %s
                     ORDER BY distance_m ASC
                     LIMIT 1000
                     """,
-                    (lat, lat, lon, lat, lat, lon,
-                     lon0, lon1, lat0, lat1, radius),
+                    params,
                 )
                 result["local_records"] = [
                     self._row_serializable(r) for r in cur.fetchall()

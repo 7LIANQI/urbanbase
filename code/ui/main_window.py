@@ -2481,6 +2481,23 @@ class MainWindow(QWidget):
         query_group.setLayout(q)
         outer.addWidget(query_group)
 
+        # ---- 选择数据集（勾选要查询的） ----
+        ds_group = QGroupBox("📦 选择数据集（勾选要查询的）")
+        ds_layout = QVBoxLayout()
+        ds_btn_row = QHBoxLayout()
+        all_btn = QPushButton("全选")
+        all_btn.clicked.connect(lambda: self._toggle_dataset_checkboxes(True))
+        ds_btn_row.addWidget(all_btn)
+        none_btn = QPushButton("全不选")
+        none_btn.clicked.connect(lambda: self._toggle_dataset_checkboxes(False))
+        ds_btn_row.addWidget(none_btn)
+        ds_btn_row.addStretch()
+        ds_layout.addLayout(ds_btn_row)
+        self.pg_dataset_cb_container = QVBoxLayout()
+        ds_layout.addLayout(self.pg_dataset_cb_container)
+        ds_group.setLayout(ds_layout)
+        outer.addWidget(ds_group)
+
         # ---- 导入导师数据 ----
         import_group = QGroupBox("📥 导入本地数据 (CSV / Excel / GeoJSON)")
         il = QVBoxLayout()
@@ -2498,6 +2515,8 @@ class MainWindow(QWidget):
         il.addWidget(self.pg_dataset_list)
         import_group.setLayout(il)
         outer.addWidget(import_group)
+
+        self._refresh_dataset_checkboxes()
 
         return panel
 
@@ -2536,6 +2555,7 @@ class MainWindow(QWidget):
         if ok:
             QMessageBox.information(self, "启动成功", f"✅ {msg}")
             self.log_box.append(f"✅ {msg}")
+            self._refresh_datasets()
         else:
             QMessageBox.warning(self, "启动失败", f"❌ {msg}")
 
@@ -2607,8 +2627,14 @@ class MainWindow(QWidget):
             )
             return
         radius = self.pg_q_radius.value()
+        selected = self._get_selected_dataset_ids()
+        if selected is not None and not selected:
+            QMessageBox.warning(self, "提示", "请至少勾选一个数据集")
+            return
         try:
-            result = self._get_pg_store().query_local(lon, lat, radius)
+            result = self._get_pg_store().query_local(
+                lon, lat, radius, dataset_ids=selected,
+            )
         except Exception as e:
             QMessageBox.warning(self, "查询失败", f"数据库查询失败：\n{e}")
             return
@@ -2697,6 +2723,10 @@ class MainWindow(QWidget):
             points = points[:200]
 
         radius = self.pg_q_radius.value()
+        selected = self._get_selected_dataset_ids()
+        if selected is not None and not selected:
+            QMessageBox.warning(self, "提示", "请至少勾选一个数据集")
+            return
         store = self._get_pg_store()
         name_map = {}
         try:
@@ -2707,9 +2737,10 @@ class MainWindow(QWidget):
 
         rows = []
         total_records = 0
+        empty_points = 0
         for lon, lat in points:
             try:
-                result = store.query_local(lon, lat, radius)
+                result = store.query_local(lon, lat, radius, dataset_ids=selected)
             except Exception:
                 continue
             records = result["local_records"]
@@ -2717,19 +2748,23 @@ class MainWindow(QWidget):
             self._add_result_row(
                 rows, "📌 查询点", f"经度 {lon}, 纬度 {lat}", "", f"命中 {len(records)} 条", "",
             )
-            for rec in records[:50]:
-                ds_id = rec.get("dataset_id")
-                src = name_map.get(ds_id, f"数据集{ds_id}")
-                self._append_record_rows(
-                    rows, src, rec.get("payload", {}),
-                    obs=rec.get("obs_time") or "",
-                    dist=rec.get("distance_m"),
-                )
+            if records:
+                for rec in records[:50]:
+                    ds_id = rec.get("dataset_id")
+                    src = name_map.get(ds_id, f"数据集{ds_id}")
+                    self._append_record_rows(
+                        rows, src, rec.get("payload", {}),
+                        obs=rec.get("obs_time") or "",
+                        dist=rec.get("distance_m"),
+                    )
+            else:
+                empty_points += 1
+                self._add_result_row(rows, "", "", "⚠️ 该点附近无数据", "", "")
 
-        self._show_query_result(
-            "批量查询结果", rows,
-            f"📌 批量查询 {len(points)} 个点，共命中 {total_records} 条数据",
-        )
+        summary = f"📌 批量查询 {len(points)} 个点，共命中 {total_records} 条数据"
+        if empty_points:
+            summary += f"（其中 {empty_points} 个点无数据）"
+        self._show_query_result("批量查询结果", rows, summary)
 
     def _import_local_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -2793,6 +2828,41 @@ class MainWindow(QWidget):
         self.log_box.append(msg)
         self._refresh_datasets()
 
+    def _refresh_dataset_checkboxes(self):
+        """刷新数据集复选框列表（每个数据集一个勾选框，默认全选）。"""
+        self.pg_dataset_checkboxes = {}
+        while self.pg_dataset_cb_container.count():
+            item = self.pg_dataset_cb_container.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        try:
+            datasets = self._get_pg_store().list_datasets()
+        except Exception:
+            datasets = []
+        if not datasets:
+            lbl = QLabel("（暂无数据集，先导入一个）")
+            lbl.setStyleSheet("color: #999; font-size: 11px;")
+            self.pg_dataset_cb_container.addWidget(lbl)
+            return
+        for d in datasets:
+            cb = QCheckBox(f"{d['name']}（{d['record_count']} 条）")
+            cb.setChecked(True)
+            self.pg_dataset_checkboxes[d["id"]] = cb
+            self.pg_dataset_cb_container.addWidget(cb)
+
+    def _toggle_dataset_checkboxes(self, checked):
+        """全选 / 全不选。"""
+        for cb in getattr(self, "pg_dataset_checkboxes", {}).values():
+            cb.setChecked(checked)
+
+    def _get_selected_dataset_ids(self):
+        """返回勾选的数据集 id 列表；无数据集时返回 None。"""
+        cbs = getattr(self, "pg_dataset_checkboxes", {})
+        if not cbs:
+            return None
+        return [ds_id for ds_id, cb in cbs.items() if cb.isChecked()]
+
     def _refresh_datasets(self):
         self.pg_dataset_list.clear()
         try:
@@ -2805,6 +2875,7 @@ class MainWindow(QWidget):
                 self.pg_dataset_list.addItem(item)
         except Exception:
             pass
+        self._refresh_dataset_checkboxes()
 
     def _on_dataset_clicked(self, item):
         dataset_id = item.data(Qt.ItemDataRole.UserRole)
