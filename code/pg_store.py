@@ -456,9 +456,13 @@ class PostgresStore:
 
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
-            proc = subprocess.run(
+            # 不能用 capture_output=True：pg_ctl start 拉起的 postgres 后台进程
+            # 会继承管道句柄，导致 communicate() 永远等不到 EOF 而卡死。
+            # 这里输出重定向到 DEVNULL，避免死锁。
+            subprocess.run(
                 [pg_ctl, "-D", PG_DATA_DIR, "-l", PG_LOG_PATH, "start"],
-                capture_output=True, timeout=60, creationflags=creationflags,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=90, creationflags=creationflags,
             )
         except Exception as e:
             return False, f"启动进程出错: {e}"
@@ -466,9 +470,7 @@ class PostgresStore:
         if self.is_available():
             return True, "PostgreSQL 已启动，可以正常使用本地数据了"
 
-        out = (proc.stdout + proc.stderr).decode("gbk", errors="replace").strip()
-        detail = out[:200] or "未知错误"
-        return False, f"启动未成功：{detail}"
+        return False, "启动未成功：请查看 D:\\PostgreSQL17\\pg.log"
 
     def ensure_database(self):
         """若目标库不存在则创建（连接维护库 postgres）。返回 True 表示库可用。"""
