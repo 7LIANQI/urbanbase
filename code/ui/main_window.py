@@ -184,6 +184,51 @@ def _fmt_cell(v):
     return str(v)
 
 
+class LocalQueryResultDialog(QDialog):
+    """本地数据查询结果弹窗。"""
+
+    def __init__(self, title, rows, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(780, 560)
+
+        layout = QVBoxLayout(self)
+        self.summary_label = QLabel("")
+        layout.addWidget(self.summary_label)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["类型", "来源", "指标", "值", "时间"])
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        for row in rows:
+            self._append(row)
+        layout.addWidget(self.table)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def set_summary(self, text, color="#27ae60"):
+        self.summary_label.setText(text)
+        self.summary_label.setStyleSheet(
+            f"color: {color}; font-size: 13px; font-weight: bold;"
+        )
+
+    def _append(self, row):
+        type_, source, metric, value, time_ = row
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        self.table.setItem(r, 0, QTableWidgetItem(str(type_)))
+        self.table.setItem(r, 1, QTableWidgetItem(str(source)))
+        self.table.setItem(r, 2, QTableWidgetItem(str(metric)))
+        self.table.setItem(r, 3, QTableWidgetItem(str(value)))
+        self.table.setItem(r, 4, QTableWidgetItem(str(time_)))
+
+
 class MainWindow(QWidget):
     """应用主窗口。"""
 
@@ -2430,18 +2475,9 @@ class MainWindow(QWidget):
         qbtn_row.addStretch()
         q.addLayout(qbtn_row)
 
-        self.pg_result_label = QLabel("")
-        self.pg_result_label.setStyleSheet("color: #666; font-size: 11px;")
-        q.addWidget(self.pg_result_label)
-
-        self.pg_result_table = QTableWidget(0, 5)
-        self.pg_result_table.setHorizontalHeaderLabels(
-            ["类型", "来源", "指标", "值", "时间"]
-        )
-        self.pg_result_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch
-        )
-        q.addWidget(self.pg_result_table)
+        hint = QLabel("点击「查询」或「批量查询」后，结果会在弹窗中显示")
+        hint.setStyleSheet("color: #999; font-size: 11px;")
+        q.addWidget(hint)
         query_group.setLayout(q)
         outer.addWidget(query_group)
 
@@ -2538,26 +2574,26 @@ class MainWindow(QWidget):
         except AttributeError:
             pass
 
-    def _add_result_row(self, type_, source, metric, value, time_):
-        r = self.pg_result_table.rowCount()
-        self.pg_result_table.insertRow(r)
-        self.pg_result_table.setItem(r, 0, QTableWidgetItem(type_))
-        self.pg_result_table.setItem(r, 1, QTableWidgetItem(str(source)))
-        self.pg_result_table.setItem(r, 2, QTableWidgetItem(str(metric)))
-        self.pg_result_table.setItem(r, 3, QTableWidgetItem(str(value)))
-        self.pg_result_table.setItem(r, 4, QTableWidgetItem(str(time_)))
+    def _add_result_row(self, rows, type_, source, metric, value, time_):
+        rows.append((type_, str(source), str(metric), str(value), str(time_)))
 
-    def _append_record_rows(self, src, payload, obs="", dist=None):
+    def _append_record_rows(self, rows, src, payload, obs="", dist=None):
         """把一条自有数据记录展开成多行（距离 + 各字段）。"""
         if dist is not None:
-            self._add_result_row("自有数据", src, "距离(m)", round(dist, 1), obs)
+            self._add_result_row(rows, "自有数据", src, "距离(m)", round(dist, 1), obs)
         if isinstance(payload, dict):
             for k, v in payload.items():
                 if str(k).strip().lower() in _COORD_KEYS:
                     continue
-                self._add_result_row("自有数据", src, str(k), _fmt_cell(v), obs)
+                self._add_result_row(rows, "自有数据", src, str(k), _fmt_cell(v), obs)
         elif payload is not None:
-            self._add_result_row("自有数据", src, "payload", _fmt_cell(payload), obs)
+            self._add_result_row(rows, "自有数据", src, "payload", _fmt_cell(payload), obs)
+
+    def _show_query_result(self, title, rows, summary, color="#27ae60"):
+        """用弹窗展示查询结果。"""
+        dlg = LocalQueryResultDialog(title, rows, self)
+        dlg.set_summary(summary, color)
+        dlg.exec()
 
     def _query_local_data(self):
         try:
@@ -2585,30 +2621,29 @@ class MainWindow(QWidget):
             pass
 
         n_records = len(result["local_records"])
-        self.pg_result_table.setRowCount(0)
 
+        rows = []
         for m in result["metrics"][:500]:
             self._add_result_row(
-                "指标", m.get("source", ""), m.get("metric", ""),
+                rows, "指标", m.get("source", ""), m.get("metric", ""),
                 m.get("value", ""), m.get("obs_time") or "",
             )
-
         for rec in result["local_records"][:300]:
             ds_id = rec.get("dataset_id")
             src = name_map.get(ds_id, f"数据集{ds_id}")
             self._append_record_rows(
-                src, rec.get("payload", {}),
+                rows, src, rec.get("payload", {}),
                 obs=rec.get("obs_time") or "",
                 dist=rec.get("distance_m"),
             )
 
-        # 结果反馈：有数据绿字、没数据红字，确保点查询一定有可见反馈
         total = len(result["metrics"]) + n_records
         if total == 0:
-            self.pg_result_label.setText(
-                f"⚠️ (经度 {lon}, 纬度 {lat}) 半径 {radius}m 内没有找到任何数据"
+            self._show_query_result(
+                "查询结果", rows,
+                f"⚠️ (经度 {lon}, 纬度 {lat}) 半径 {radius}m 内没有找到任何数据",
+                color="#c0392b",
             )
-            self.pg_result_label.setStyleSheet("color: #c0392b; font-size: 13px;")
         else:
             msg = (
                 f"📊 历史采集 {len(result['runs'])} 次 | "
@@ -2617,8 +2652,7 @@ class MainWindow(QWidget):
             )
             if n_records > 300:
                 msg += "（仅显示前 300 条，按距离由近到远）"
-            self.pg_result_label.setText(msg)
-            self.pg_result_label.setStyleSheet("color: #27ae60; font-size: 13px;")
+            self._show_query_result("查询结果", rows, msg)
 
     def _batch_query_local(self):
         """批量查询：导入坐标文件，对每个点查询附近本地数据。"""
@@ -2671,7 +2705,7 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
-        self.pg_result_table.setRowCount(0)
+        rows = []
         total_records = 0
         for lon, lat in points:
             try:
@@ -2681,21 +2715,21 @@ class MainWindow(QWidget):
             records = result["local_records"]
             total_records += len(records)
             self._add_result_row(
-                "📌 查询点", f"经度 {lon}, 纬度 {lat}", "", f"命中 {len(records)} 条", "",
+                rows, "📌 查询点", f"经度 {lon}, 纬度 {lat}", "", f"命中 {len(records)} 条", "",
             )
             for rec in records[:50]:
                 ds_id = rec.get("dataset_id")
                 src = name_map.get(ds_id, f"数据集{ds_id}")
                 self._append_record_rows(
-                    src, rec.get("payload", {}),
+                    rows, src, rec.get("payload", {}),
                     obs=rec.get("obs_time") or "",
                     dist=rec.get("distance_m"),
                 )
 
-        self.pg_result_label.setText(
-            f"📌 批量查询 {len(points)} 个点，共命中 {total_records} 条数据"
+        self._show_query_result(
+            "批量查询结果", rows,
+            f"📌 批量查询 {len(points)} 个点，共命中 {total_records} 条数据",
         )
-        self.pg_result_label.setStyleSheet("color: #27ae60; font-size: 13px;")
 
     def _import_local_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -2779,14 +2813,16 @@ class MainWindow(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "错误", f"查询失败: {e}")
             return
-        self.pg_result_table.setRowCount(0)
         name = item.text().split(" — ")[0]
+        rows = []
         for rec in records:
             self._append_record_rows(
-                name, rec.get("payload", {}),
+                rows, name, rec.get("payload", {}),
                 obs=rec.get("obs_time") or "",
             )
-        self.pg_result_label.setText(f"📥 {name} 共 {len(records)} 条记录")
+        self._show_query_result(
+            f"数据集：{name}", rows, f"📥 {name} 共 {len(records)} 条记录",
+        )
 
     # ==================== 生命周期 ====================
 
