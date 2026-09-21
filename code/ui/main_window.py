@@ -2612,6 +2612,16 @@ class MainWindow(QWidget):
         elif payload is not None:
             self._add_result_row(rows, "自有数据", src, "payload", _fmt_cell(payload), obs)
 
+    def _note_empty_datasets(self, rows, check_ids, matched_ids, name_map,
+                             suffix="该区域无此数据集的数据"):
+        """把勾选但无数据的数据集明确标注出来。"""
+        for ds_id in check_ids:
+            if ds_id not in matched_ids:
+                self._add_result_row(
+                    rows, "⚠️ 无数据", name_map.get(ds_id, f"数据集{ds_id}"), "",
+                    suffix, "",
+                )
+
     def _show_query_result(self, title, rows, summary, color="#27ae60"):
         """用弹窗展示查询结果。"""
         dlg = LocalQueryResultDialog(title, rows, self)
@@ -2665,6 +2675,11 @@ class MainWindow(QWidget):
                 obs=rec.get("obs_time") or "",
                 dist=rec.get("distance_m"),
             )
+
+        # 标注：勾选的数据集里，该区域没有数据的
+        check_ids = selected if selected is not None else list(name_map.keys())
+        matched_ids = {rec.get("dataset_id") for rec in result["local_records"]}
+        self._note_empty_datasets(rows, check_ids, matched_ids, name_map)
 
         total = len(result["metrics"]) + n_records
         if total == 0:
@@ -2760,6 +2775,12 @@ class MainWindow(QWidget):
                         obs=rec.get("obs_time") or "",
                         dist=rec.get("distance_m"),
                     )
+                check_ids = selected if selected is not None else list(name_map.keys())
+                matched_ids = {rec.get("dataset_id") for rec in records}
+                self._note_empty_datasets(
+                    rows, check_ids, matched_ids, name_map,
+                    suffix="该点附近无此数据集的数据",
+                )
             else:
                 empty_points += 1
                 self._add_result_row(rows, "", "", "⚠️ 该点附近无数据", "", "")
