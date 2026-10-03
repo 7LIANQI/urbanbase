@@ -33,6 +33,9 @@ _DEFAULT_OPTIONS = {
     "gee_precipitation": True,
     "gee_ndwi": True,
     "gee_evi": True,
+    "gee_savi": True,
+    "gee_mndwi": True,
+    "gee_fvc": True,
     "gee_population": True,
     "gee_era5_climate": True,
     "gee_era5_hourly": True,
@@ -63,7 +66,9 @@ def _any_gee(options):
     """判断是否启用了任意 GEE 子模块。"""
     gee_keys = [
         "gee_viirs", "gee_ndvi", "gee_lst", "gee_elevation",
-        "gee_precipitation", "gee_ndwi", "gee_evi", "gee_population",
+        "gee_precipitation", "gee_ndwi", "gee_evi",
+        "gee_savi", "gee_mndwi", "gee_fvc",
+        "gee_population",
         "gee_era5_climate", "gee_era5_hourly",
         "gee_landcover", "gee_s5p_no2", "gee_jrc_water",
         "gee_modis_lst", "gee_dynamic_world", "gee_hansen_forest",

@@ -579,6 +579,98 @@ def get_ndwi_evi_stats(roi_geometry, start_date, end_date, output_dir,
         log("  ⏭️ EVI 已禁用")
 
 
+def get_savi_mndwi_fvc_stats(roi_geometry, start_date, end_date, output_dir,
+                             log_callback=None, enable_savi=True,
+                             enable_mndwi=True, enable_fvc=True):
+    """从 Sentinel-2 计算 SAVI / MNDWI / 植被覆盖度(FVC) 时间序列。
+
+    SAVI (土壤调节植被指数): 1.5 * (NIR - Red) / (NIR + Red + 0.5)
+    MNDWI (改进水体指数): (Green - SWIR1) / (Green + SWIR1) = (B3 - B11) / (B3 + B11)
+    FVC (植被覆盖度): 像元二分法 (NDVI - 0.05) / (0.86 - 0.05)，截断到 [0, 1]
+
+    输出: savi_stats.csv, mndwi_stats.csv, fvc_stats.csv
+    """
+    log = make_logger(log_callback)
+
+    if not enable_savi and not enable_mndwi and not enable_fvc:
+        return
+
+    s2 = (
+        ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+        .filterBounds(roi_geometry)
+        .filterDate(start_date, end_date)
+        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    )
+
+    def add_indices(img):
+        nir = img.select('B8').toFloat()
+        red = img.select('B4').toFloat()
+        green = img.select('B3').toFloat()
+        swir = img.select('B11').toFloat()
+        ndvi = nir.subtract(red).divide(nir.add(red)).rename('NDVI')
+        savi = nir.subtract(red).divide(nir.add(red).add(0.5)).multiply(1.5).rename('SAVI')
+        mndwi = green.subtract(swir).divide(green.add(swir)).rename('MNDWI')
+        # 像元二分法植被覆盖度，裸土/纯植被阈值取 0.05 / 0.86
+        fvc = ndvi.subtract(0.05).divide(0.86 - 0.05).clamp(0, 1).rename('FVC')
+        return img.addBands([savi, mndwi, fvc])
+
+    s2_indices = s2.map(add_indices).select(['SAVI', 'MNDWI', 'FVC'])
+
+    def calc_indices(img):
+        stats = img.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=roi_geometry,
+            scale=10,
+            maxPixels=1e9,
+        )
+        return ee.Feature(None, stats).set({
+            'Date': img.date().format('YYYY-MM-dd'),
+        })
+
+    def _save(band, filename, label, colname):
+        feats = s2_indices.select(band).map(calc_indices).getInfo()
+        records = [
+            f['properties'] for f in feats.get('features', [])
+            if f.get('properties', {}).get(band) is not None
+        ]
+        if records:
+            df = pd.DataFrame(records)
+            df = df[['Date', band]]
+            df.columns = ['Date', colname]
+            df[colname] = df[colname].round(4)
+            df.to_csv(os.path.join(output_dir, filename), index=False)
+            log(f"  {label} 数据已保存（{len(df)} 景）")
+        else:
+            log(f"  {label} 无有效数据，跳过")
+
+    if enable_savi:
+        try:
+            log("  计算 Sentinel-2 SAVI...")
+            _save('SAVI', "savi_stats.csv", "SAVI", "区域SAVI均值")
+        except Exception as e:
+            log(f"  SAVI 处理出错: {e}")
+    else:
+        log("  ⏭️ SAVI 已禁用")
+
+    if enable_mndwi:
+        try:
+            log("  计算 Sentinel-2 MNDWI...")
+            _save('MNDWI', "mndwi_stats.csv", "MNDWI", "区域MNDWI均值")
+        except Exception as e:
+            log(f"  MNDWI 处理出错: {e}")
+    else:
+        log("  ⏭️ MNDWI 已禁用")
+
+    if enable_fvc:
+        try:
+            log("  计算 植被覆盖度(FVC)...")
+            _save('FVC', "fvc_stats.csv", "植被覆盖度", "区域植被覆盖度均值")
+        except Exception as e:
+            log(f"  植被覆盖度处理出错: {e}")
+    else:
+        log("  ⏭️ 植被覆盖度已禁用")
+
+
 def get_population_stats(roi_geometry, output_dir, log_callback=None):
     """获取人口密度数据（WorldPop 为主，GPW 为备）。
 

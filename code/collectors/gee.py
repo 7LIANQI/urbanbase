@@ -11,6 +11,7 @@ from plugins.gee_plugin import (
     get_elevation_stats,
     get_precipitation_stats,
     get_ndwi_evi_stats,
+    get_savi_mndwi_fvc_stats,
     get_population_stats,
     get_landcover_stats,
     get_s5p_no2_stats,
@@ -36,6 +37,9 @@ class GEECollector(BaseCollector):
         "gee_precipitation": ("降水", "precipitation_stats.csv"),
         "gee_ndwi":        ("NDWI 水体", "ndwi_stats.csv"),
         "gee_evi":         ("EVI 植被", "evi_stats.csv"),
+        "gee_savi":        ("SAVI 植被", "savi_stats.csv"),
+        "gee_mndwi":       ("MNDWI 水体", "mndwi_stats.csv"),
+        "gee_fvc":         ("植被覆盖度", "fvc_stats.csv"),
         "gee_population":  ("人口", "population_stats.csv"),
         "gee_era5_climate": ("ERA5 气候逐日", "era5_climate_stats.csv"),
         "gee_era5_hourly": ("ERA5 逐时", "era5_hourly.csv"),
@@ -153,6 +157,25 @@ class GEECollector(BaseCollector):
                     files["evi_stats"] = self._path("evi_stats.csv")
             else:
                 self.log("⏭️ NDWI/EVI 已禁用")
+
+            # ---- SAVI + MNDWI + 植被覆盖度 ----
+            if self._any_enabled(["gee_savi", "gee_mndwi", "gee_fvc"]):
+                self.log("计算 SAVI/MNDWI/植被覆盖度...")
+                get_savi_mndwi_fvc_stats(
+                    roi, self.start_date, self.end_date, self.output_dir,
+                    log_callback=log_cb,
+                    enable_savi=self._opt("gee_savi"),
+                    enable_mndwi=self._opt("gee_mndwi"),
+                    enable_fvc=self._opt("gee_fvc"),
+                )
+                if self._opt("gee_savi"):
+                    files["savi_stats"] = self._path("savi_stats.csv")
+                if self._opt("gee_mndwi"):
+                    files["mndwi_stats"] = self._path("mndwi_stats.csv")
+                if self._opt("gee_fvc"):
+                    files["fvc_stats"] = self._path("fvc_stats.csv")
+            else:
+                self.log("⏭️ SAVI/MNDWI/植被覆盖度 已禁用")
 
             # ---- 人口密度 ----
             if self._opt("gee_population"):

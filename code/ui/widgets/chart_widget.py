@@ -27,6 +27,9 @@ class ChartWidget(QWidget):
     CHART_NDVI = "NDVI 时间序列"
     CHART_EVI = "EVI 时间序列"
     CHART_NDWI = "NDWI 时间序列"
+    CHART_SAVI = "SAVI 时间序列"
+    CHART_MNDWI = "MNDWI 时间序列"
+    CHART_FVC = "植被覆盖度 时间序列"
     CHART_LST = "地表温度 时间序列"
     CHART_VIIRS = "夜光强度 时间序列"
     CHART_PRECIP = "降水量 时间序列"
@@ -58,6 +61,7 @@ class ChartWidget(QWidget):
         self.chart_combo = QComboBox()
         self.chart_combo.addItems([
             self.CHART_NDVI, self.CHART_EVI, self.CHART_NDWI,
+            self.CHART_SAVI, self.CHART_MNDWI, self.CHART_FVC,
             self.CHART_LST, self.CHART_VIIRS, self.CHART_PRECIP,
             self.CHART_ERA5_TEMP, self.CHART_ERA5_SOLAR, self.CHART_ERA5_SUN,
             self.CHART_ERA5_HOURLY_TEMP, self.CHART_ERA5_HOURLY_SOLAR,
@@ -118,6 +122,15 @@ class ChartWidget(QWidget):
             elif chart_type == self.CHART_NDWI:
                 self._plot(ax, "ndwi_stats.csv", 'Date', '区域NDWI均值',
                            "NDWI 时间序列", "NDWI 值", '#2980b9')
+            elif chart_type == self.CHART_SAVI:
+                self._plot(ax, "savi_stats.csv", 'Date', '区域SAVI均值',
+                           "SAVI 时间序列", "SAVI 值", '#16a085')
+            elif chart_type == self.CHART_MNDWI:
+                self._plot(ax, "mndwi_stats.csv", 'Date', '区域MNDWI均值',
+                           "MNDWI 时间序列", "MNDWI 值", '#1abc9c')
+            elif chart_type == self.CHART_FVC:
+                self._plot(ax, "fvc_stats.csv", 'Date', '区域植被覆盖度均值',
+                           "植被覆盖度 时间序列", "植被覆盖度", '#27ae60')
             elif chart_type == self.CHART_LST:
                 self._plot(ax, "lst_stats.csv", 'Date', '地表温度均值(C)',
                            "地表温度 时间序列", "温度 (C)", 'red')
