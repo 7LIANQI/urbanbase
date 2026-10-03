@@ -9,15 +9,12 @@
 import os
 import re
 
-import numpy as np
-from scipy.io import netcdf_file
-
 from utils import make_logger
 
 
 def _nearest_index(arr, value):
-    """找数组中最接近 value 的下标。"""
-    return int(np.argmin(np.abs(arr - value)))
+    """找数组中最接近 value 的下标（纯 Python，不依赖 numpy）。"""
+    return int(min(range(len(arr)), key=lambda i: abs(arr[i] - value)))
 
 
 def _parse_uv_filename(fname):
@@ -43,6 +40,14 @@ def get_uv_stats(lon, lat, data_dir, output_dir, log_callback=None):
         {file_key: path} 字典（供 index.json 用），无数据返回 {}。
     """
     log = make_logger(log_callback)
+
+    # scipy 仅在本函数内按需加载，避免 app 启动时因缺依赖崩溃
+    try:
+        import numpy as np
+        from scipy.io import netcdf_file
+    except ImportError:
+        log("⚠️ 缺少 scipy 依赖，无法读取紫外线数据（请运行 pip install scipy）")
+        return {}
 
     if not os.path.isdir(data_dir):
         log("⚠️ 紫外线数据目录不存在")
