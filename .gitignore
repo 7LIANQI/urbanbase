@@ -46,3 +46,7 @@ Thumbs.db
 
 # PostgreSQL 本地库（便携版二进制，通常装在仓库外 D:\PostgreSQL17）
 PostgreSQL*/
+
+# 本地大数据文件（紫外线 netCDF 栅格等，不提交）
+*.nc
+code/data/

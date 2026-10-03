@@ -19,6 +19,7 @@ from collectors import (
     GEECollector,
     OSMCollector,
     LocalDataCollector,
+    UVCollector,
 )
 
 # 默认选项：全部启用
@@ -52,6 +53,7 @@ _DEFAULT_OPTIONS = {
     "osm_water_bodies": True,
     "osm_stats": True,
     "local_data": True,
+    "uv": True,
 }
 
 
@@ -129,6 +131,9 @@ def _build_collectors(lon, lat, radius, start_date, end_date,
 
     if _opt(options, "local_data"):
         collectors.append(LocalDataCollector(**common))
+
+    if _opt(options, "uv"):
+        collectors.append(UVCollector(**common))
 
     return collectors
 

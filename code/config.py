@@ -1,4 +1,5 @@
 """全局配置与常量。"""
+import os
 
 # ---------- API 端点 ----------
 OPENWEATHER_AIR_POLLUTION_URL = "https://api.openweathermap.org/data/2.5/air_pollution"
@@ -41,3 +42,6 @@ PG_PASSWORD = "postgres"   # 本地开发默认密码（仅监听本机），多
 PG_BIN_DIR = r"D:\PostgreSQL17\pgsql\bin"
 PG_DATA_DIR = r"D:\PostgreSQL17\data"
 PG_LOG_PATH = r"D:\PostgreSQL17\pg.log"
+
+# ---------- 本地紫外线数据（netCDF3，存放在 code/data/uv 下） ----------
+UV_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "uv")

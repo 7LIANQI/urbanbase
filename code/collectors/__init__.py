@@ -6,6 +6,7 @@ from .streetview import StreetViewCollector
 from .gee import GEECollector
 from .osm import OSMCollector
 from .local_data import LocalDataCollector
+from .uv import UVCollector
 
 __all__ = [
     "AirQualityCollector",
@@ -14,4 +15,5 @@ __all__ = [
     "GEECollector",
     "OSMCollector",
     "LocalDataCollector",
+    "UVCollector",
 ]

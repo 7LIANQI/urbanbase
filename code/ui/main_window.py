@@ -475,6 +475,7 @@ class MainWindow(QWidget):
         "osm_stats":          ("📸", "OSM 统计指标 — 实时快照\n基于当前最新 OSM 数据计算"),
         # ---- 本地数据 ----
         "local_data":         ("🗄️", "本地数据 — 查询 PostgreSQL 本地库\n按经纬度/时间范围查询历史采集结果\n及导师导入的本地数据集\n（需在「本地数据」Tab 配置连接）"),
+        "uv":                 ("☀️", "本地紫外线 — 中国晴空紫外数据集\n数据源: 本地 netCDF3 文件（code/data/uv）\n10km 分辨率，1981-2023 年\n输出总紫外 / UV-A / UV-B"),
     }
 
     def _build_options_group(self):
@@ -579,6 +580,7 @@ class MainWindow(QWidget):
         # 🗄️ 本地数据
         g_local, self.opt_local = make_group("🗄️ 本地数据 (PostgreSQL)", [
             ("local_data", "本地历史 + 导师数据"),
+            ("uv", "本地紫外线数据 (netCDF)"),
         ])
         scroll_layout.addWidget(g_local)
 
