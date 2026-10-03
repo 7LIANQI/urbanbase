@@ -1337,6 +1337,7 @@ class MainWindow(QWidget):
         btn_html = msg.addButton("📄 HTML 报告", QMessageBox.ButtonRole.AcceptRole)
         btn_csv = msg.addButton("📊 CSV 汇总", QMessageBox.ButtonRole.ActionRole)
         btn_geojson = msg.addButton("🗺️ GeoJSON 合并", QMessageBox.ButtonRole.ActionRole)
+        btn_slices = msg.addButton("📋 汇总宽表(指标×时间切片)", QMessageBox.ButtonRole.ActionRole)
         msg.setStandardButtons(QMessageBox.StandardButton.Cancel)
         msg.exec()
 
@@ -1347,6 +1348,27 @@ class MainWindow(QWidget):
             self._export_csv(current_dir)
         elif clicked == btn_geojson:
             self._export_geojson(current_dir)
+        elif clicked == btn_slices:
+            self._export_summary_slices()
+
+    def _export_summary_slices(self):
+        """导出汇总宽表（指标 × Cur/2y/3y/5y/10y 时间切片，多点合并）。"""
+        if not self.output_dirs:
+            QMessageBox.information(self, "提示", "没有可导出的数据")
+            return
+        from summary_export import build_summary_csv
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "导出汇总宽表", f"汇总宽表_{datetime.now():%Y%m%d_%H%M%S}.csv",
+            "CSV Files (*.csv)",
+        )
+        if not save_path:
+            return
+        ok, info = build_summary_csv(self.output_dirs, save_path)
+        if ok:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(save_path))
+            self.log_box.append(f"📋 汇总宽表已保存: {save_path}（{info} 行）")
+        else:
+            QMessageBox.warning(self, "导出失败", f"❌ {info}")
 
     def _export_html(self, current_dir):
 
