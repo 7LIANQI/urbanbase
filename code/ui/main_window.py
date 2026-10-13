@@ -275,7 +275,8 @@ class MainWindow(QWidget):
         main_layout = QHBoxLayout(self)
 
         # ----- 左侧：历史记录面板 -----
-        main_layout.addWidget(self._build_left_panel())
+        self.history_panel = self._build_left_panel()
+        main_layout.addWidget(self.history_panel)
 
         # ----- 右侧：主内容区 -----
         main_layout.addWidget(self._build_right_panel())
@@ -346,9 +347,12 @@ class MainWindow(QWidget):
         # ---- Tab 1: 数据采集 ----
         tab_collect = QWidget()
         collect_layout = QVBoxLayout(tab_collect)
-        collect_layout.addWidget(self._build_api_group())
-        collect_layout.addWidget(self._build_options_group())
-        collect_layout.addWidget(self._build_input_group())
+        self.grp_api = self._build_api_group()
+        self.grp_options = self._build_options_group()
+        self.grp_input = self._build_input_group()
+        collect_layout.addWidget(self.grp_api)
+        collect_layout.addWidget(self.grp_options)
+        collect_layout.addWidget(self.grp_input)
         collect_layout.addLayout(self._build_ctrl_buttons())
         self.progress = QProgressBar()
         collect_layout.addWidget(self.progress)

@@ -18,23 +18,17 @@ from PyQt6.QtWidgets import QApplication
 #  must be set before a QCoreApplication instance is created"
 QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
-from ui.main_window import MainWindow
+from core import theme
+from ui.shell import ShellWindow
 
 
 def main():
     """应用入口函数（供 pyproject.toml [project.scripts] 调用）。"""
+    from PyQt6.QtCore import QSettings
     app = QApplication(sys.argv)
+    theme.apply(app, QSettings("MyCompany", "UrbanAnalysisApp").value("ui/theme", "light"))
 
-    # 检测系统主题并应用
-    try:
-        from styles import apply_theme, get_current_mpl_rcparams
-        is_dark = apply_theme(app, get_current_mpl_rcparams())
-        if is_dark:
-            print("🌙 已启用暗色模式")
-    except ImportError:
-        pass  # styles.py 不存在时跳过
-
-    win = MainWindow()
+    win = ShellWindow()
     win.show()
     sys.exit(app.exec())
 

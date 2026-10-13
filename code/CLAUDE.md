@@ -6,7 +6,7 @@
 
 ## 技术栈
 
-- **语言**: Python ≥3.10
+- **语言**: Python ≥3.11
 - **GUI**: PyQt6 + PyQt6-WebEngine（Folium 地图嵌入）
 - **地理空间**: geopandas, shapely, osmnx, folium
 - **遥感**: Google Earth Engine Python API (`earthengine-api`)
@@ -17,8 +17,19 @@
 ## 架构
 
 ```
-app.py              → 入口，Qt 初始化 + Matplotlib 中文配置
-pipeline.py         → 核心采集编排器（轻量，遍历 Collector 列表）
+app.py              → 入口，Qt 初始化 + Matplotlib 中文配置，启动 ui/shell.py 的 ShellWindow
+core/               → 内核：plugin.py（Plugin 基类/发现/AppContext）、logbus.py（日志总线）、theme.py（Google 风格主题）、icons.py（内置 SVG 图标）
+modules/            → 工具插件（download/match/analysis/manage 四类），每个 Plugin 子类自动出现在「工具箱」与菜单，点击后在独立工具窗口打开；
+                      也可在 ~/.urbansense/plugins/ 放 .py 作为用户插件
+ui/shell.py         → 主窗口（QGIS/ENVI 风格）：菜单+工具栏+图层面板+地图画布+工具箱+日志面板，工程(.usproj)存取
+ui/map_canvas.py    → 地图画布（matplotlib，统一 EPSG:4326，矢量/GeoTIFF，平移缩放）；ui/layers_panel.py 图层面板（符号化/属性表）
+plugins/gee_catalog.py → GEE 数据源目录（按指标类别分组，每类多个可选来源，含说明与链接；设置 → GEE 数据源 中全局选择）
+plugins/local_extract.py → 本地栅格库点位提取引擎（窗口读取 COG，口径与 GEE 提取一致；序列的 scale/offset/nodata/categorical 在 dataset.json 里设置）
+plugins/gee_extract.py → 点位指标提取引擎（无界面，分批请求 GEE 并合并 CSV）
+core/raster_catalog.py → 栅格数据目录（每个数据序列一个文件夹 + dataset.json；命名规则、缺期/重复/范围/文件头一致性检查）
+core/cog.py → 批量转 COG（含从文件名识别日期、补坐标系/无效值）
+ui/toolbox.py、tool_dialog.py、pages/ → 工具箱、工具窗口外壳、日志页与选项对话框
+                      旧版 ui/main_window.py 的 MainWindow 作为隐藏的采集引擎，面板由 ctx.legacy_part() 拆给各工具复用
 collectors/         → 采集器类（每种数据源一个）── NEW
   base.py           → BaseCollector 抽象基类
   air_quality.py    → 空气质量
@@ -35,6 +46,7 @@ plugins/            → 底层数据采集函数（被 collectors 调用）
 ui/
   main_window.py    → 主窗口（1400行，含 API 配置/点位表格/结果弹窗/历史面板）
   worker.py         → QThread 后台采集线程
+  raster_to_roads_window.py → 栅格值路网赋值工具（菜单「工具」打开，独立窗口）
   widgets/          → 6 个展示组件
 config.py           → API 端点 / LST 常量 / AQI 颜色 / 污染物名称
 utils.py            → 日志器 / 重试装饰器 / 密钥混淆 / 安全调用
