@@ -16,7 +16,7 @@ import time
 
 import requests
 
-from utils import make_logger
+from core.utils import make_logger
 
 # ---- 模块级缓存（带 TTL） ----
 _CACHE_TTL_SECONDS = 600  # 10 分钟过期

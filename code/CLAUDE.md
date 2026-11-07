@@ -48,9 +48,9 @@ ui/
   worker.py         → QThread 后台采集线程
   raster_to_roads_window.py → 栅格值路网赋值工具（菜单「工具」打开，独立窗口）
   widgets/          → 6 个展示组件
-config.py           → API 端点 / LST 常量 / AQI 颜色 / 污染物名称
-utils.py            → 日志器 / 重试装饰器 / 密钥混淆 / 安全调用
-styles.py           → 暗色/亮色主题样式表 ── NEW
+core/config.py      → API 端点 / LST 常量 / AQI 颜色 / 污染物名称
+core/utils.py       → 日志器 / 重试装饰器 / 密钥混淆 / 安全调用
+ui/styles.py        → 暗色/亮色主题样式表
 ```
 
 ## 代码风格
@@ -69,7 +69,7 @@ styles.py           → 暗色/亮色主题样式表 ── NEW
 cd code中期汇报 && python app.py
 
 # 命令行模式（无需 GUI）
-python pipeline.py
+python collectors/pipeline.py
 
 # 运行测试
 python -m pytest tests/ -v

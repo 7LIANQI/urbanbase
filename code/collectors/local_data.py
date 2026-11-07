@@ -16,7 +16,7 @@ class LocalDataCollector(BaseCollector):
 
     def collect(self):
         try:
-            from pg_store import get_store
+            from database.pg_store import get_store
         except ImportError:
             self.log("⚠️ pg_store 模块不可用，跳过本地数据")
             return {}

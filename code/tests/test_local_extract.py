@@ -165,3 +165,38 @@ def test_append_runs(tmp_path):
     # 不追加：覆盖成只有本次的列
     assert run([ser[1]], False) == []
     assert pd.read_csv(out, encoding="utf-8-sig").columns.tolist() == ["lon", "lat", "date", "备注", "p_y_cur"]
+
+
+def test_local_only_gcj02_gpkg_uses_wgs84(tmp_path):
+    """本地提取使用国内加密坐标时，结果表保留原列，GPKG 必须写入转换后的 WGS84 位置。"""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QApplication
+    import geopandas as gpd
+
+    from core import crs as CR
+    from ui.pages.extract_widget import _Worker
+
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+    QApplication.instance() or QApplication([])
+
+    lon_wgs, lat_wgs = 116.3912, 39.9055
+    lon_gcj, lat_gcj = CR._wgs_to_gcj(
+        np.array([lon_wgs]), np.array([lat_wgs])
+    )
+    out = tmp_path / "local_gcj.csv"
+    pd.DataFrame({
+        "id": ["a"],
+        "lon": [float(lon_gcj[0])],
+        "lat": [float(lat_gcj[0])],
+    }).to_csv(out, index=False, encoding="utf-8-sig")
+
+    w = _Worker(None, {"crs": "gcj02", "epsg": 4326}, str(out))
+    w.geo_cols = ("lon", "lat")
+    w._write_gpkg()
+
+    gpkg = tmp_path / "local_gcj.gpkg"
+    assert gpkg.exists()
+    gdf = gpd.read_file(gpkg)
+    assert abs(gdf.geometry.iloc[0].x - lon_wgs) < 1e-6
+    assert abs(gdf.geometry.iloc[0].y - lat_wgs) < 1e-6
+    assert pd.read_csv(out)["lon"].iloc[0] == float(lon_gcj[0])       # CSV 仍保留原始输入坐标

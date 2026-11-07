@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
-from config import AQI_COLORS, POLLUTANT_NAMES
+from core.config import AQI_COLORS, POLLUTANT_NAMES
 
 
 class AirQualityWidget(QWidget):

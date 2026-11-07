@@ -7,7 +7,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 try:
-    from pg_store import (
+    from database.pg_store import (
         _haversine_m, _radius_bounds, _geom_first_point, detect_columns,
         _parse_coord, _parse_date, read_points_txt,
     )

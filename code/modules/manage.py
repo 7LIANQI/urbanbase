@@ -8,12 +8,13 @@ class HistoryPlugin(Plugin):
     category = "manage"
     order = 10
     icon = "database"
-    description = "浏览历史采集结果，支持筛选、对比、时间线与清理。"
-    size = (520, 640)
+    description = ("统一浏览输出文件夹、SQLite 和 PostgreSQL 中的采集历史；"
+                   "数据库记录即使没有本地文件也能查看指标。")
+    size = (1050, 720)
 
     def create(self, ctx):
-        ctx.legacy_engine()
-        return ctx.legacy_part("history")
+        from ui.pages.history_widget import HistoryWidget
+        return HistoryWidget(ctx)
 
 
 class CatalogPlugin(Plugin):

@@ -52,6 +52,12 @@ class ShellWindow(QMainWindow):
         saved = self.settings.value("map/basemap", DEFAULT)
         self.set_basemap(saved if saved in BASEMAPS else (None if saved == "" else DEFAULT))
         self.bus.add("UrbanSense 已启动")
+        schedule_enabled = str(self.settings.value("schedule/enabled", False)).strip().lower()
+        if schedule_enabled in ("1", "true", "yes", "on"):
+            try:
+                self.ctx.legacy_engine()       # 创建隐藏控制器并恢复定时任务
+            except Exception as e:
+                self.bus.add(f"⚠️ 定时采集恢复失败：{e}")
 
     # ---------- 构建 ----------
     def _dock(self, title, widget, area, name):

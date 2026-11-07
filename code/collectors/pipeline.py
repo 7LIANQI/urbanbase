@@ -11,8 +11,8 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
-from utils import make_logger
-from collectors import (
+from core.utils import make_logger
+from . import (
     AirQualityCollector,
     WeatherCollector,
     StreetViewCollector,
@@ -244,7 +244,7 @@ def process_location(lon, lat, radius=500, start_date=None, end_date=None,
 
     # ---- 记录到本地缓存数据库 ----
     try:
-        from local_cache import get_cache
+        from database.local_cache import get_cache
         cache = get_cache()
         cache.record_collection(
             lon=lon, lat=lat, radius=radius,
@@ -259,7 +259,7 @@ def process_location(lon, lat, radius=500, start_date=None, end_date=None,
 
     # ---- 落库到 PostgreSQL 本地库 ----
     try:
-        from pg_store import get_store
+        from database.pg_store import get_store
         get_store().persist_output(
             out_dir, lon, lat, radius, start_date, end_date,
             options=options, label=label,

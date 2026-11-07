@@ -4,7 +4,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from pipeline import _opt, _any_gee, _any_osm
+from collectors.pipeline import _opt, _any_gee, _any_osm
 
 # 完整默认选项
 FULL = {

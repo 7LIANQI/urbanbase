@@ -28,8 +28,9 @@ from .widgets import (
     MapWidget,
     StatsWidget,
 )
-from utils import FileLogger, secure_store, secure_load
-from config import PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD
+from core.schedule import next_run, timer_delay_ms
+from core.utils import FileLogger, secure_store, secure_load
+from core.config import PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD
 
 
 class LogDialog(QDialog):
@@ -241,6 +242,12 @@ class MainWindow(QWidget):
         self.settings = QSettings("MyCompany", "UrbanAnalysisApp")
         self.file_logger = FileLogger("logs")
         self._data_cache = {}  # output_dir -> {widget_key: preloaded_data} (LRU, max 5)
+        self._schedule_active = False
+        self._schedule_anchor = datetime.now().date()
+        self._next_run_at = None
+        self._schedule_timer = QTimer(self)
+        self._schedule_timer.setSingleShot(True)
+        self._schedule_timer.timeout.connect(self._on_schedule_timer)
 
         # 日志弹窗（点击采集时才显示）
         self.log_dialog = LogDialog(self)
@@ -265,6 +272,7 @@ class MainWindow(QWidget):
         self._load_history()
 
         self.log_box.append("📋 日志文件: " + self.file_logger.log_path)
+        QTimer.singleShot(0, self._restore_schedule)
 
     # ==================== UI 构建 ====================
 
@@ -784,8 +792,6 @@ class MainWindow(QWidget):
     def _build_schedule_group(self):
         """构建定时采集面板。"""
         group = QGroupBox("⏰ 定时采集")
-        group.setCheckable(True)
-        group.setChecked(False)
         group.setToolTip("启用后按设定频率自动采集数据")
         layout = QVBoxLayout()
 
@@ -796,6 +802,10 @@ class MainWindow(QWidget):
         self.schedule_freq_combo.addItems([
             "每天", "每周", "每月",
         ])
+        self.schedule_freq_combo.setToolTip(
+            "每周按首次启用当天的星期重复；每月按首次启用当天的日期重复，"
+            "当月没有该日期时在月末执行。"
+        )
         freq_row.addWidget(self.schedule_freq_combo)
         freq_row.addWidget(QLabel("执行时间:"))
         self.schedule_time_edit = QTimeEdit()
@@ -818,6 +828,22 @@ class MainWindow(QWidget):
         mode_row.addWidget(self.schedule_mode_combo)
         mode_row.addStretch()
         layout.addLayout(mode_row)
+
+        saved_freq = self.settings.value("schedule/frequency", "每天")
+        if saved_freq in [self.schedule_freq_combo.itemText(i) for i in range(self.schedule_freq_combo.count())]:
+            self.schedule_freq_combo.setCurrentText(saved_freq)
+        saved_time = QTime.fromString(self.settings.value("schedule/time", "08:00"), "HH:mm")
+        if saved_time.isValid():
+            self.schedule_time_edit.setTime(saved_time)
+        saved_mode = self.settings.value("schedule/mode", "")
+        if saved_mode in [self.schedule_mode_combo.itemText(i) for i in range(self.schedule_mode_combo.count())]:
+            self.schedule_mode_combo.setCurrentText(saved_mode)
+        anchor_text = self.settings.value("schedule/anchor", "")
+        if anchor_text:
+            try:
+                self._schedule_anchor = datetime.fromisoformat(str(anchor_text)).date()
+            except ValueError:
+                pass
 
         # 状态和按钮行
         ctrl_row = QHBoxLayout()
@@ -842,19 +868,12 @@ class MainWindow(QWidget):
         ctrl_row.addWidget(self.schedule_stop_btn)
 
         layout.addLayout(ctrl_row)
+        self.schedule_freq_combo.currentIndexChanged.connect(self._schedule_config_changed)
+        self.schedule_time_edit.timeChanged.connect(self._schedule_config_changed)
+        self.schedule_mode_combo.currentIndexChanged.connect(self._schedule_config_changed)
 
         group.setLayout(layout)
         return group
-
-    def _calc_schedule_interval(self):
-        """计算定时采集间隔（毫秒）。"""
-        freq = self.schedule_freq_combo.currentText()
-        if freq == "每天":
-            return 24 * 60 * 60 * 1000
-        elif freq == "每周":
-            return 7 * 24 * 60 * 60 * 1000
-        else:  # 每月
-            return 30 * 24 * 60 * 60 * 1000
 
     def _get_schedule_days(self):
         """获取定时采集的日期回溯天数。"""
@@ -866,60 +885,207 @@ class MainWindow(QWidget):
         else:
             return 365
 
-    def _start_schedule(self):
-        """启动定时采集。"""
-        interval = self._calc_schedule_interval()
-        self._schedule_timer = QTimer()
-        self._schedule_timer.timeout.connect(self._scheduled_collect)
-        self._schedule_timer.start(interval)
+    def _schedule_state_path(self):
+        return Path.home() / ".urbansense" / "schedule_project.json"
 
-        # 计算下次执行时间
-        now = datetime.now()
-        target_time = self.schedule_time_edit.time()
-        target_dt = now.replace(
-            hour=target_time.hour(),
-            minute=target_time.minute(),
-            second=0, microsecond=0,
-        )
-        if target_dt <= now:
-            target_dt = target_dt.replace(day=target_dt.day + 1) if self.schedule_freq_combo.currentText() == "每天" else target_dt
+    def _schedule_points(self):
+        """读取可用于定时任务的点位，并校验坐标与半径。"""
+        points = []
+        for row in range(self.table.rowCount()):
+            try:
+                lon = float(self.table.item(row, 0).text())
+                lat = float(self.table.item(row, 1).text())
+                radius = int(float(self.table.item(row, 2).text()))
+                note = self.table.item(row, 3).text() if self.table.item(row, 3) else ""
+            except (ValueError, AttributeError):
+                continue
+            if -180 <= lon <= 180 and -90 <= lat <= 90 and 0 < radius <= 50000:
+                points.append({"lon": lon, "lat": lat, "radius": radius, "note": note})
+        return points
 
-        self.schedule_status_label.setText("▶ 运行中")
-        self.schedule_status_label.setStyleSheet("font-weight: bold; color: #27ae60;")
-        self.schedule_next_label.setText(
-            f"下次: {target_dt.strftime('%m-%d %H:%M')}"
-        )
-        self.schedule_start_btn.setEnabled(False)
-        self.schedule_stop_btn.setEnabled(True)
+    def _schedule_options(self):
+        options = {}
+        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm, self.opt_local]:
+            for key, cb in opt_dict.items():
+                options[key] = cb.isChecked()
+        return options
 
-        # 持久化到 QSettings
-        self.settings.setValue("schedule/enabled", True)
+    def _snapshot_schedule(self):
+        """保存点位与数据项，保证软件重启后仍能执行定时任务。"""
+        import json as _json
+        path = self._schedule_state_path()
+        data = {
+            "version": 1,
+            "anchor": self._schedule_anchor.isoformat(),
+            "points": self._schedule_points(),
+            "options": self._schedule_options(),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(_json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+
+    def _apply_schedule_snapshot(self, data):
+        points = data.get("points")
+        if not isinstance(points, list) or not points:
+            raise ValueError("定时任务没有保存点位")
+        self.table.setRowCount(0)
+        for pt in points:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(str(pt.get("lon", ""))))
+            self.table.setItem(row, 1, QTableWidgetItem(str(pt.get("lat", ""))))
+            self.table.setItem(row, 2, QTableWidgetItem(str(pt.get("radius", ""))))
+            self.table.setItem(row, 3, QTableWidgetItem(str(pt.get("note", ""))))
+        options = data.get("options", {})
+        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm, self.opt_local]:
+            for key, cb in opt_dict.items():
+                cb.setChecked(options.get(key, True))
+        anchor_text = data.get("anchor", "")
+        if anchor_text:
+            self._schedule_anchor = datetime.fromisoformat(str(anchor_text)).date()
+
+    def _save_schedule_settings(self, enabled):
+        self.settings.setValue("schedule/enabled", bool(enabled))
         self.settings.setValue("schedule/frequency", self.schedule_freq_combo.currentText())
         self.settings.setValue("schedule/mode", self.schedule_mode_combo.currentText())
         self.settings.setValue("schedule/time", self.schedule_time_edit.time().toString("HH:mm"))
+        self.settings.setValue("schedule/anchor", self._schedule_anchor.isoformat())
         self.settings.sync()
 
-        self.log_box.append("⏰ 定时采集已启动")
+    def _next_schedule_time(self, now):
+        target = self.schedule_time_edit.time()
+        return next_run(
+            now,
+            self.schedule_freq_combo.currentText(),
+            target.hour(),
+            target.minute(),
+            self._schedule_anchor,
+        )
 
-    def _stop_schedule(self):
-        """停止定时采集。"""
-        if hasattr(self, "_schedule_timer") and self._schedule_timer:
-            self._schedule_timer.stop()
+    def _update_schedule_label(self, last=None):
+        if self._next_run_at is None:
+            self.schedule_next_label.setText("")
+            return
+        text = f"下次: {self._next_run_at.strftime('%m-%d %H:%M')}"
+        if last is not None:
+            text = f"上次: {last.strftime('%m-%d %H:%M')} | " + text
+        self.schedule_next_label.setText(text)
 
+    def _arm_schedule_timer(self):
+        if not self._schedule_active or self._next_run_at is None:
+            return
+        now = datetime.now()
+        delay = timer_delay_ms(now, self._next_run_at)
+        self._schedule_timer.start(max(1, delay))
+        self._update_schedule_label()
+
+    def _on_schedule_timer(self):
+        if not self._schedule_active:
+            return
+        now = datetime.now()
+        if self._next_run_at is None or now < self._next_run_at:
+            self._arm_schedule_timer()
+            return
+        last = self._next_run_at
+        self._next_run_at = self._next_schedule_time(now)
+        self._arm_schedule_timer()
+        self._update_schedule_label(last)
+        self._scheduled_collect()
+
+    def _schedule_config_changed(self, *_):
+        if not self._schedule_active:
+            return
+        self._save_schedule_settings(True)
+        self._next_run_at = self._next_schedule_time(datetime.now())
+        self._arm_schedule_timer()
+
+    def _restore_schedule(self):
+        enabled = str(self.settings.value("schedule/enabled", False)).strip().lower()
+        if enabled not in ("1", "true", "yes", "on"):
+            return
+        path = self._schedule_state_path()
+        try:
+            import json as _json
+            data = _json.loads(path.read_text(encoding="utf-8"))
+            self._apply_schedule_snapshot(data)
+            self._start_schedule(restore=True)
+        except Exception as e:
+            self.log_box.append(f"⚠️ 定时采集无法恢复：{e}")
+            self._stop_schedule(notify=False)
+
+    def _start_schedule(self, _checked=False, restore=False):
+        """启动按指定时刻运行的定时采集。"""
+        points = self._schedule_points()
+        if not points:
+            if not restore:
+                QMessageBox.information(self, "提示", "请先添加至少一个有效点位，再启动定时采集。")
+            else:
+                self.log_box.append("⚠️ 定时采集没有有效点位，已停止")
+                self._stop_schedule(notify=False)
+            return
+
+        if not restore:
+            self._schedule_anchor = datetime.now().date()
+
+        # 保存密钥、输出目录和 PostgreSQL 配置，重启后定时任务仍可使用。
+        self.settings.setValue(
+            "keys/weather_key",
+            secure_store("weather_key", self.weather_key_input.text()),
+        )
+        self.settings.setValue("keys/gee_key", self.gee_key_input.text())
+        self.settings.setValue(
+            "keys/baidu_key",
+            secure_store("baidu_key", self.baidu_key_input.text()),
+        )
+        self.settings.setValue("paths/output_dir", self.output_dir_input.text())
+        try:
+            self._get_pg_store()
+        except Exception:
+            pass
+
+        try:
+            self._snapshot_schedule()
+        except Exception as e:
+            self.log_box.append(f"⚠️ 定时任务配置保存失败：{e}")
+
+        self._schedule_active = True
+        self._next_run_at = self._next_schedule_time(datetime.now())
+        self._save_schedule_settings(True)
+        self.schedule_status_label.setText("▶ 运行中")
+        self.schedule_status_label.setStyleSheet("font-weight: bold; color: #27ae60;")
+        self.schedule_start_btn.setEnabled(False)
+        self.schedule_stop_btn.setEnabled(True)
+        self._arm_schedule_timer()
+        self.log_box.append(f"⏰ 定时采集已启动，下次执行：{self._next_run_at:%Y-%m-%d %H:%M}")
+
+    def _stop_schedule(self, _checked=False, notify=True):
+        """停止定时采集，但保留点位快照供下次启动。"""
+        self._schedule_active = False
+        self._schedule_timer.stop()
+        self._next_run_at = None
         self.schedule_status_label.setText("⏸️ 未启动")
         self.schedule_status_label.setStyleSheet("font-weight: bold; color: #888;")
         self.schedule_next_label.setText("")
         self.schedule_start_btn.setEnabled(True)
         self.schedule_stop_btn.setEnabled(False)
-
         self.settings.setValue("schedule/enabled", False)
         self.settings.sync()
-
-        self.log_box.append("⏰ 定时采集已停止")
+        if notify:
+            self.log_box.append("⏰ 定时采集已停止")
 
     def _scheduled_collect(self):
         """定时触发一次采集。"""
         from datetime import timedelta
+
+        if self.worker and self.worker.isRunning():
+            self.log_box.append("⚠️ 定时采集跳过：上一次采集仍在运行")
+            try:
+                from database.local_cache import get_cache
+                get_cache().record_schedule_run("skipped", error_msg="上一次采集仍在运行")
+            except Exception:
+                pass
+            return
 
         now = datetime.now()
         days = self._get_schedule_days()
@@ -927,48 +1093,32 @@ class MainWindow(QWidget):
         ed = now.strftime("%Y-%m-%d")
 
         self.log_box.append(f"⏰ 定时采集触发 — {sd} ~ {ed}")
-
-        # 记录执行历史
-        try:
-            from local_cache import get_cache
-            cache = get_cache()
-            cache.record_schedule_run("running")
-        except Exception:
-            pass
-
-        # 复用 _start_tasks 逻辑（简版：直接构建任务并执行）
-        tasks = []
-        for row in range(self.table.rowCount()):
-            try:
-                lon = float(self.table.item(row, 0).text())
-                lat = float(self.table.item(row, 1).text())
-                r = int(float(self.table.item(row, 2).text()))
-            except (ValueError, AttributeError):
-                continue
-            if not (-180 <= lon <= 180 and -90 <= lat <= 90):
-                continue
-            tasks.append((lon, lat, r, sd, ed))
+        tasks = [
+            (p["lon"], p["lat"], p["radius"], sd, ed)
+            for p in self._schedule_points()
+        ]
 
         if not tasks:
             self.log_box.append("⚠️ 定时采集：无有效点位，跳过")
             try:
-                from local_cache import get_cache
+                from database.local_cache import get_cache
                 get_cache().record_schedule_run("failed", error_msg="无有效点位")
             except Exception:
                 pass
             return
 
-        # 更新下次执行时间
-        self.schedule_next_label.setText(
-            f"上次: {now.strftime('%m-%d %H:%M')} | "
-            f"下次: {(now + timedelta(milliseconds=self._calc_schedule_interval())).strftime('%m-%d %H:%M')}"
-        )
+        # 定时任务使用当前点位和数据项，并同步为重启后的快照。
+        try:
+            self._snapshot_schedule()
+        except Exception as e:
+            self.log_box.append(f"⚠️ 定时任务配置保存失败：{e}")
 
-        # 构建选项
-        options = {}
-        for opt_dict in [self.opt_air, self.opt_street, self.opt_gee, self.opt_osm, self.opt_local]:
-            for key, cb in opt_dict.items():
-                options[key] = cb.isChecked()
+        # 记录执行历史
+        try:
+            from database.local_cache import get_cache
+            get_cache().record_schedule_run("running")
+        except Exception:
+            pass
 
         # 同步 PostgreSQL 连接配置
         try:
@@ -981,7 +1131,7 @@ class MainWindow(QWidget):
             self.baidu_key_input.text(),
             self.weather_key_input.text(),
             self.gee_key_input.text(),
-            options,
+            self._schedule_options(),
             file_logger=self.file_logger.log,
             output_base_dir=self.output_dir_input.text().strip() or None,
         )
@@ -994,7 +1144,7 @@ class MainWindow(QWidget):
             duration = (datetime.now() - now).total_seconds() * 1000
             status = "success" if dirs else "failed"
             try:
-                from local_cache import get_cache
+                from database.local_cache import get_cache
                 get_cache().record_schedule_run(
                     status,
                     output_dir=dirs[0] if dirs else "",
@@ -1204,6 +1354,9 @@ class MainWindow(QWidget):
     # ==================== 任务控制 ====================
 
     def _start_tasks(self):
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(self, "任务运行中", "上一次采集尚未结束，请等待完成或先停止。")
+            return
         # 保存设置（敏感密钥加密存储）
         self.settings.setValue(
             "keys/weather_key",
@@ -1360,7 +1513,7 @@ class MainWindow(QWidget):
         if not self.output_dirs:
             QMessageBox.information(self, "提示", "没有可导出的数据")
             return
-        from summary_export import build_summary_csv
+        from core.summary_export import build_summary_csv
         save_path, _ = QFileDialog.getSaveFileName(
             self, "导出汇总宽表", f"汇总宽表_{datetime.now():%Y%m%d_%H%M%S}.csv",
             "CSV Files (*.csv)",
@@ -1398,7 +1551,7 @@ class MainWindow(QWidget):
                 report_lines.append("<h3>🌬️ 空气质量</h3>")
                 report_lines.append(f"<p>AQI 等级: <b>{n.get('aqi', 'N/A')}</b></p>")
                 report_lines.append("<table border='1' cellpadding='4'><tr><th>污染物</th><th>浓度 (μg/m³)</th></tr>")
-                from config import POLLUTANT_NAMES
+                from core.config import POLLUTANT_NAMES
                 comps = n.get("components", {})
                 for key, label in POLLUTANT_NAMES.items():
                     if key in comps:
@@ -1889,7 +2042,7 @@ class MainWindow(QWidget):
 
         # 更新缓存统计
         try:
-            from local_cache import get_cache
+            from database.local_cache import get_cache
             cache = get_cache()
             s = cache.get_summary()
             self.cache_stats_label.setText(
@@ -2154,7 +2307,7 @@ class MainWindow(QWidget):
             return
 
         try:
-            from local_cache import get_cache
+            from database.local_cache import get_cache
             cache = get_cache()
             records = cache.get_timeline(lon, lat, radius=1000)
         except Exception as e:
@@ -2210,7 +2363,7 @@ class MainWindow(QWidget):
     def _show_cache_stats(self):
         """显示本地缓存数据库统计信息。"""
         try:
-            from local_cache import get_cache
+            from database.local_cache import get_cache
             cache = get_cache()
             summary = cache.get_summary()
         except Exception as e:
@@ -2562,7 +2715,7 @@ class MainWindow(QWidget):
 
     def _get_pg_store(self):
         """按界面连接参数构建/配置 PostgresStore 单例。"""
-        from pg_store import get_store
+        from database.pg_store import get_store
         try:
             port = int(self.pg_port_input.text().strip())
         except ValueError:
@@ -2744,7 +2897,7 @@ class MainWindow(QWidget):
         if not file_path:
             return
 
-        from pg_store import read_points_txt, read_table, detect_columns, _parse_coord
+        from database.pg_store import read_points_txt, read_table, detect_columns, _parse_coord
 
         try:
             ext = os.path.splitext(file_path)[1].lower()
@@ -2849,7 +3002,7 @@ class MainWindow(QWidget):
                     file_path, name, source="用户上传",
                 )
             elif ext == ".txt":
-                from pg_store import read_points_txt
+                from database.pg_store import read_points_txt
                 df = read_points_txt(file_path)
                 if df.empty:
                     QMessageBox.warning(self, "错误", "未从 TXT 中解析出任何点位")
@@ -2858,7 +3011,7 @@ class MainWindow(QWidget):
                     df, name, source="用户上传", lon_col="lon", lat_col="lat",
                 )
             else:
-                from pg_store import read_table, detect_columns
+                from database.pg_store import read_table, detect_columns
                 df = read_table(file_path)
                 lon_col, lat_col, time_col = detect_columns(df)
                 if lon_col is None or lat_col is None:
@@ -2986,7 +3139,14 @@ class MainWindow(QWidget):
     # ==================== 生命周期 ====================
 
     def closeEvent(self, event):
+        if self._schedule_active:
+            try:
+                self._snapshot_schedule()
+            except Exception:
+                pass
+        self._schedule_timer.stop()
         if self.worker and self.worker.isRunning():
+            self.worker.stop()
             self.worker.quit()
             self.worker.wait(3000)
         event.accept()

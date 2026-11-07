@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pandas as pd
 
-from summary_export import _compute_slices, build_summary_csv
+from core.summary_export import _compute_slices, build_summary_csv
 
 
 class TestComputeSlices:

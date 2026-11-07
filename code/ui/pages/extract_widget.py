@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QRadioButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
+from core.crs import to_wgs84
 from ui.widgets.info_icon import InfoIcon, TitledLabel
 
 _COLS = {"id": ("id", "编号", "点位", "name", "序号"), "lon": ("lon", "lng", "longitude", "经度", "x"),
@@ -30,6 +31,20 @@ def guess_column(cols, key):
     return -1
 
 
+def _wgs84_xy(df, lon_col, lat_col, crs="wgs84", epsg=None):
+    """返回写入 GPKG 用的 WGS84 坐标；没有转换列时按输入坐标系现场转换。"""
+    if {"LON_WGS84", "LAT_WGS84"}.issubset(df.columns):
+        x, y = df["LON_WGS84"], df["LAT_WGS84"]
+    else:
+        x, y = to_wgs84(
+            pd.to_numeric(df[lon_col], errors="coerce"),
+            pd.to_numeric(df[lat_col], errors="coerce"),
+            crs,
+            epsg,
+        )
+    return pd.Series(x, index=df.index), pd.Series(y, index=df.index)
+
+
 class _Worker(QThread):
     progress = pyqtSignal(int, int)
     log = pyqtSignal(str)
@@ -41,8 +56,8 @@ class _Worker(QThread):
         try:
             import geopandas as gpd
             df = pd.read_csv(self.out_csv, encoding="utf-8-sig")
-            lon, lat = (("LON_WGS84", "LAT_WGS84") if "LON_WGS84" in df.columns else self.geo_cols)
-            x, y = pd.to_numeric(df[lon], errors="coerce"), pd.to_numeric(df[lat], errors="coerce")
+            kw = self.gee_kw or self.local_kw or {}
+            x, y = _wgs84_xy(df, *self.geo_cols, kw.get("crs", "wgs84"), kw.get("epsg"))
             ok = x.between(-180, 180) & y.between(-90, 90)       # 坐标缺失或超范围的行不进图层（否则图层范围无效）
             gdf = gpd.GeoDataFrame(df[ok], geometry=gpd.points_from_xy(x[ok], y[ok]), crs=4326)
             gdf.to_file(os.path.splitext(self.out_csv)[0] + ".gpkg", driver="GPKG")
@@ -526,7 +541,8 @@ class ExtractWidget(QWidget):
                 w.setParent(None)          # 立刻摘下，避免新旧控件叠在一起
                 w.deleteLater()
         self.local_checks = {}
-        root = self.ctx.settings.value("paths/raster_root", "")
+        from core.storage import ensure_raster_root
+        root = ensure_raster_root(self.ctx.settings)
         if not root or not os.path.isdir(root):
             self.local_grid.addWidget(_hint("尚未设置栅格数据目录（设置 → 选项 → 常规）"), 0, 0, 1, 4)
             return

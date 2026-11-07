@@ -132,7 +132,7 @@ def apply(app, mode="light"):
     """mode: light / dark / system。返回是否暗色。"""
     if mode == "system":
         try:
-            from styles import _detect_system_dark
+            from ui.styles import _detect_system_dark
             dark = _detect_system_dark()
         except ImportError:
             dark = False

@@ -1,7 +1,7 @@
 """本地紫外线数据采集器。"""
 from .base import BaseCollector
 from plugins.uv_plugin import get_uv_stats
-from config import UV_DATA_DIR
+from core.config import UV_DATA_DIR
 
 
 class UVCollector(BaseCollector):

@@ -50,7 +50,8 @@ class CatalogWidget(QWidget):
         # ① 目录位置
         g = QGroupBox("① 栅格数据目录")
         gl = _grid(g)
-        self.root = QLineEdit(ctx.settings.value("paths/raster_root", ""))
+        from core.storage import ensure_raster_root
+        self.root = QLineEdit(ensure_raster_root(ctx.settings))
         self.root.setPlaceholderText("选择存放栅格数据的根目录（也可在 设置 → 常规 中设置）")
         b = QPushButton("浏览…")
         b.clicked.connect(self._pick_root)
@@ -248,6 +249,10 @@ class CatalogWidget(QWidget):
             self.ctx.settings.setValue("paths/raster_root", p)
             self.reload()
 
+    def _ensure_default_root(self):
+        from core.storage import ensure_raster_root
+        return ensure_raster_root(self.ctx.settings)
+
     def reload(self, select=None):
         self.tree.clear()
         self.cur = None
@@ -256,6 +261,11 @@ class CatalogWidget(QWidget):
         if not root or not Path(root).is_dir():
             return
         self.series, errs = RC.load_all(root)
+        if not self.series:
+            self.summary.setText(
+                f"默认栅格库已就绪：{root}。请点击「新建数据序列」，"
+                "然后到「栅格转 COG」把原始栅格放入该序列。"
+            )
         names = dict(_categories())
         groups = {}
         for s in self.series:

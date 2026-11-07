@@ -80,7 +80,7 @@ python app.py
 命令行模式（无需 GUI）：
 
 ```bash
-python pipeline.py
+python -m collectors.pipeline
 ```
 
 ## 使用流程
@@ -97,10 +97,11 @@ python pipeline.py
 ```
 code/
 ├── app.py                    # 应用入口（Qt 初始化 + 中文 Matplotlib 配置）
-├── pipeline.py               # 命令行采集管线
-├── config.py                 # API 端点 / 常量 / PostgreSQL 连接
-├── utils.py                  # 日志器、重试装饰器、密钥混淆
+├── collectors/              # 多源采集器与命令行采集管线
+├── database/                # SQLite 缓存与 PostgreSQL 数据库
 ├── core/                     # 内核（无界面）
+│   ├── config.py             #   API 端点、常量与 PostgreSQL 配置
+│   ├── utils.py              #   日志、重试与密钥混淆
 │   ├── plugin.py             #   Plugin 基类、自动发现、AppContext
 │   ├── theme.py / icons.py   #   Google 极简主题；内置 SVG 图标
 │   ├── raster_catalog.py     #   栅格数据目录（Series、dataset.json、一致性检查）
@@ -164,7 +165,7 @@ scripts\pg_stop.bat
 scripts\pg_init.bat
 ```
 
-默认连接（`config.py` 中可改，界面也可配置）：`localhost:5432`，库 `urban_analysis`，用户 / 密码 `postgres / postgres`。
+默认连接（`core/config.py` 中可改，界面也可配置）：`localhost:5432`，库 `urban_analysis`，用户 / 密码 `postgres / postgres`。
 
 首次使用时点「初始化表」创建数据库表。
 

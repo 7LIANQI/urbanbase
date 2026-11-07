@@ -26,6 +26,7 @@ output_*/
 # 本地数据库缓存与测试缓存
 *.db
 .pytest_cache/
+pytest-cache-files-*/
 
 # 合并输出文件与街景存档（运行时生成）
 merged_output_*.geojson

@@ -18,7 +18,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from config import (
+from core.config import (
     PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD,
     PG_BIN_DIR, PG_DATA_DIR, PG_LOG_PATH,
 )
@@ -827,6 +827,61 @@ class PostgresStore:
                     self._row_serializable(r) for r in cur.fetchall()
                 ]
             return result
+        finally:
+            conn.close()
+
+    def query_collection_runs(self, start_time=None, limit=5000):
+        """按采集时间列出历史任务，供采集历史页统一展示。"""
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                if start_time:
+                    cur.execute(
+                        """SELECT * FROM collection_runs
+                           WHERE collected_at >= %s
+                           ORDER BY collected_at DESC LIMIT %s""",
+                        (start_time, limit),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT * FROM collection_runs ORDER BY collected_at DESC LIMIT %s",
+                        (limit,),
+                    )
+                return [self._row_serializable(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def query_run_details(self, run_id):
+        """读取一次历史任务的指标和文件清单。"""
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT source, metric, value, unit, obs_time FROM metric_points "
+                    "WHERE run_id = %s ORDER BY source, metric, obs_time",
+                    (run_id,),
+                )
+                metrics = [self._row_serializable(r) for r in cur.fetchall()]
+                cur.execute(
+                    "SELECT file_key, file_path, file_type FROM data_files "
+                    "WHERE run_id = %s ORDER BY file_key",
+                    (run_id,),
+                )
+                files = [self._row_serializable(r) for r in cur.fetchall()]
+                return metrics, files
+        finally:
+            conn.close()
+
+    def delete_collection_run(self, run_id):
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM collection_runs WHERE id = %s", (run_id,))
+            conn.commit()
+            return True, "数据库记录已删除"
+        except Exception as e:
+            conn.rollback()
+            return False, str(e)
         finally:
             conn.close()
 

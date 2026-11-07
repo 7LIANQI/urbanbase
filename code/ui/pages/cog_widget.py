@@ -304,7 +304,8 @@ class CogWidget(QWidget):
             self.out.setText(p)
 
     def _load_series(self):
-        root = self.ctx.settings.value("paths/raster_root", "")
+        from core.storage import ensure_raster_root
+        root = ensure_raster_root(self.ctx.settings)
         self.ser.clear()
         self.series = []
         if root and Path(root).is_dir():

@@ -1,7 +1,7 @@
 """数据采集 Worker 线程。"""
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from pipeline import process_location
+from collectors.pipeline import process_location
 
 
 class Worker(QThread):

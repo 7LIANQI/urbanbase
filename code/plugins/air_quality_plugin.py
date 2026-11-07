@@ -3,8 +3,8 @@ import json as _json
 
 import requests
 
-from utils import make_logger, retry_on_network_error
-from config import OPENWEATHER_AIR_POLLUTION_URL
+from core.utils import make_logger, retry_on_network_error
+from core.config import OPENWEATHER_AIR_POLLUTION_URL
 
 
 @retry_on_network_error(max_retries=2, base_delay=0.5)

@@ -4,7 +4,7 @@ import os
 import geopandas as gpd
 import osmnx as ox
 
-from utils import make_logger
+from core.utils import make_logger
 
 
 def get_osm_vector_data(center_lon, center_lat, radius_m, output_dir,

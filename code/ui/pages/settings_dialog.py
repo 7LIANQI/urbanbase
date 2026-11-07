@@ -31,6 +31,8 @@ class SettingsDialog(QDialog):
 
     # ---------- 常规 ----------
     def _general(self):
+        from core.storage import ensure_raster_root
+        raster_root = ensure_raster_root(self.st)
         w = QWidget()
         form = QFormLayout(w)
         self.theme = QComboBox()
@@ -70,7 +72,7 @@ class SettingsDialog(QDialog):
 
         row2 = QHBoxLayout()
         row2.setContentsMargins(0, 0, 0, 0)
-        self.raster_root = QLineEdit(self.st.value("paths/raster_root", ""))
+        self.raster_root = QLineEdit(raster_root)
         self.raster_root.setPlaceholderText("存放栅格数据的根目录（含各数据序列文件夹）")
         b2 = QPushButton("浏览…")
         b2.clicked.connect(lambda: self._browse_to(self.raster_root, "选择栅格数据目录"))
@@ -174,10 +176,14 @@ class SettingsDialog(QDialog):
 
     # ---------- 保存 ----------
     def apply(self):
+        from core.storage import default_raster_root
         self.st.setValue("ui/theme", self.theme.currentData())
         self.st.setValue("paths/output_dir", self.out_dir.text())
         self.st.setValue("crs/default", self.crs.currentData())
         self.st.setValue("extract/granularity", self.gran.currentData())
-        self.st.setValue("paths/raster_root", self.raster_root.text())
+        self.st.setValue(
+            "paths/raster_root",
+            self.raster_root.text().strip() or str(default_raster_root()),
+        )
         for cat_key, src_key in self.sel.items():
             self.st.setValue(f"gee_sources/{cat_key}", src_key)

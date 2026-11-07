@@ -6,7 +6,7 @@ import json as _json
 
 import requests
 
-from utils import make_logger, retry_on_network_error
+from core.utils import make_logger, retry_on_network_error
 
 # OpenWeatherMap Current Weather API
 OPENWEATHER_WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"

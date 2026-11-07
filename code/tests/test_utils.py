@@ -6,7 +6,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from utils import make_logger, FileLogger
+from core.utils import make_logger, FileLogger
 
 
 def _close_logger(fl):

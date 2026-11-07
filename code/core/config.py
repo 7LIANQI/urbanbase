@@ -1,4 +1,4 @@
-"""全局配置与常量。"""
+"""全局配置与常量（运行配置）。"""
 import os
 
 # ---------- API 端点 ----------
@@ -44,4 +44,6 @@ PG_DATA_DIR = r"D:\PostgreSQL17\data"
 PG_LOG_PATH = r"D:\PostgreSQL17\pg.log"
 
 # ---------- 本地紫外线数据（netCDF3，存放在 code/data/uv 下） ----------
-UV_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "uv")
+UV_DATA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "uv"
+)

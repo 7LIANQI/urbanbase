@@ -11,8 +11,8 @@ import ee
 import pandas as pd
 from google.oauth2 import service_account
 
-from utils import make_logger
-from config import LST_SCALE, LST_OFFSET, LST_KELVIN
+from core.utils import make_logger
+from core.config import LST_SCALE, LST_OFFSET, LST_KELVIN
 
 
 def initialize_gee(key_path=None, log_callback=None):

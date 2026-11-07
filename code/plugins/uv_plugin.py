@@ -9,7 +9,7 @@
 import os
 import re
 
-from utils import make_logger
+from core.utils import make_logger
 
 
 def _nearest_index(arr, value):

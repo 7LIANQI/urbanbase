@@ -177,6 +177,16 @@ class LocalCache:
             finally:
                 conn.close()
 
+    def delete_collection(self, record_id):
+        """删除一条 SQLite 采集历史。"""
+        with self._write_lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("DELETE FROM collection_runs WHERE id = ?", (record_id,))
+                conn.commit()
+            finally:
+                conn.close()
+
     # ==================== 历史查询 ====================
 
     def query_history(self, lon=None, lat=None, radius_m=1000,

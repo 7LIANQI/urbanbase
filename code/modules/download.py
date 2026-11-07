@@ -60,7 +60,8 @@ class SchedulePlugin(Plugin):
     category = "download"
     order = 20
     icon = "clock"
-    description = "按固定间隔自动重复采集，用于连续监测（需先在「环境数据采集」中配置点位与数据项）。"
+    description = ("按每天、每周或每月的指定时刻重复采集，用于连续监测。"
+                   "每周沿用首次启用当天的星期；每月沿用首次启用当天的日期，无该日期时在月末执行。")
     size = (900, 300)
 
     def create(self, ctx):

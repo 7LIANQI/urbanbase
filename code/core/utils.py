@@ -1,4 +1,4 @@
-"""公共工具函数模块。"""
+"""公共工具函数（核心运行工具）。"""
 import functools
 import logging
 import os

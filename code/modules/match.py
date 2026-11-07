@@ -8,7 +8,8 @@ class RasterToRoadsPlugin(Plugin):
     category = "match"
     order = 10
     icon = "raster"
-    description = "把 TIF / NC 栅格的值按长度加权或最近路段分配到路网；结果自动加入地图。"
+    description = ("把 TIF / NC 栅格按长度加权或最近路段分配到 SHP / GPKG 路网。"
+                   "支持 scale/offset、人口总数或密度、坐标校验、停止任务、自动备份和处理记录。")
     size = (900, 780)
 
     def create(self, ctx):
@@ -16,10 +17,9 @@ class RasterToRoadsPlugin(Plugin):
         w = RasterToRoadsWindow()
         w.setMinimumSize(0, 0)
         shp = ctx.selected_vector_path()      # 图层面板里选中的矢量图层作为默认路网
-        if shp and shp.lower().endswith(".shp"):
+        if shp:
             w.set_shapefile(shp)
         w.output_ready.connect(ctx.add_layer)
-        w.tool_footer = {"right": [w.run_btn]}
         return w
 
 
