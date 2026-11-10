@@ -1,15 +1,12 @@
-# -*- coding: utf-8 -*-
-"""点位指标提取引擎（GEE）：每个点按「缓冲区/像素」「回溯窗口/时间段序列」提取所选数据源。
+"""从 Earth Engine 提取点位或缓冲区的指标，缺失值在 CSV 中留空。"""
 
-无界面依赖，可直接在程序里调用 run(datasets=[Source,...])；数据源见 gee_catalog.CATALOG。
-数据缺失的单元格输出为空。
-"""
 import hashlib
-import shutil
 import io
 import os
+import shutil
 import threading
 import time
+
 import ee
 import pandas as pd
 import requests
@@ -17,11 +14,10 @@ import requests
 from core.crs import to_wgs84
 from plugins.gee_plugin import initialize_gee
 
-# ---------------------------------------------------------------- 选项
-# 时间粒度：年度 / 月度。时间窗以「粒度单位」计：当前 = 观测日所在的年/月；前 N 年 = 观测日所在单位之前的 N 年
-# （年度粒度 N 个单位，月度粒度 12×N 个单位）。每个单位先合成一景，再对窗口内各单位合成一景。
 GRANULARITY = {"年度": "year", "月度": "month"}
 WINDOW_YEARS = {"cur": 0, "y1": 1, "y2": 2, "y3": 3, "y5": 5, "y10": 10}
+TEMPORAL = {"中值（推荐）": "median", "均值": "mean", "最大值": "max", "最小值": "min"}
+SPATIAL = {"均值（推荐）": "mean", "中值": "median"}
 
 
 def window_label(key, gran):
@@ -31,13 +27,10 @@ def window_label(key, gran):
 
 
 def window_units(key, gran):
-    """窗口包含的单位数；cur 为 1（观测日所在单位本身），其余为观测日所在单位之前的 N 年。"""
+    """当前窗口取观测所在的年或月，回溯窗口取此前的 N 年。"""
     return 1 if key == "cur" else WINDOW_YEARS[key] * (12 if gran == "month" else 1)
-TEMPORAL = {"中值（推荐）": "median", "均值": "mean", "最大值": "max", "最小值": "min"}
-SPATIAL = {"均值（推荐）": "mean", "中值": "median"}
 
 
-# ---------------------------------------------------------------- 时间段序列
 def make_periods(start, end, step):
     """step: 'MS' 月 / 'YS' 年（也支持 'QS' 季）。返回 [(label, start, end)]，end 不含。"""
     offset = {"MS": pd.DateOffset(months=1), "QS": pd.DateOffset(months=3), "YS": pd.DateOffset(years=1)}[step]
@@ -60,15 +53,16 @@ def column_names(datasets, mode, windows, periods):
 
 
 def add_label_columns(res, datasets):
-    """代码列 → 追加「列名_名称」中文名称列（如城乡分类）。返回新增的列名。"""
-    import pandas as pd
-    new = []
-    for d in datasets:
-        for col, mapping in d.labels.items():
-            for c in [c for c in res.columns if c == col or c.startswith(col + "_")]:
-                res[c + "_名称"] = pd.to_numeric(res[c], errors="coerce").round().map(mapping)
-                new.append(c + "_名称")
-    return new
+    """为城乡分类等编码字段补充中文名称列，返回新增列名。"""
+    added_columns = []
+    for dataset in datasets:
+        for code, mapping in dataset.labels.items():
+            matching_columns = [col for col in res.columns if col == code or col.startswith(f"{code}_")]
+            for column in matching_columns:
+                label_column = f"{column}_名称"
+                res[label_column] = pd.to_numeric(res[column], errors="coerce").round().map(mapping)
+                added_columns.append(label_column)
+    return added_columns
 
 
 def _pmap(fn, items, workers, stop=None):
@@ -104,7 +98,6 @@ def _pmap(fn, items, workers, stop=None):
     return results
 
 
-# ---------------------------------------------------------------- 运行
 class _Ctx:
     def __init__(self, df, lon, lat, log=print):
         self.log = log
@@ -124,10 +117,6 @@ def _geom_for(f, ds, buffer_m):
     return g if buffer_m < ds.scale / 2 else g.buffer(buffer_m)
 
 
-# 处理思路（性能关键）：
-#   先按「年 / 月」把整个数据源合成成一组单位影像（每个单位只合成一次，所有点共用），
-#   再用 reduceRegions 一次把每个点在每个单位上的值取出来，最后在本地按窗口汇总（中值 / 均值等）。
-#   旧做法是对每个点、每个窗口各自重新合成影像，同样的影像被反复计算成百上千次。
 def _label(kind, y, m):
     return f"{y}{m:02d}" if kind == "month" else f"{y}"
 
@@ -143,19 +132,23 @@ def units_needed(dates, windows, gran):
     return sorted(need)
 
 
-FILL_PAD_YEARS = 2          # 「最近一期替代」多取窗口范围前后各几年的单位，供缺期时挑选
+FILL_PAD_YEARS = 2
 
 
 def pad_units(units_ym, gran, years=FILL_PAD_YEARS):
-    """在这批单位的最早、最晚两端各补 years 年的单位（月度粒度按月补）。"""
+    """在窗口两端各多取 years 年的数据，供缺期时就近替代。"""
     if not units_ym:
         return units_ym
-    n = years * (12 if gran == "month" else 1)
-    ix = [y * 12 + m - 1 if gran == "month" else y for y, m in units_ym]
-    lo, hi = min(ix), max(ix)
-    add = [i for i in list(range(lo - n, lo)) + list(range(hi + 1, hi + n + 1))]
-    cv = (lambda i: (i // 12, i % 12 + 1)) if gran == "month" else (lambda i: (i, 1))
-    return sorted(set(units_ym) | {cv(i) for i in add})
+    monthly = gran == "month"
+    padding = years * (12 if monthly else 1)
+    indices = [year * 12 + month - 1 if monthly else year for year, month in units_ym]
+    first, last = min(indices), max(indices)
+    extra_indices = [*range(first - padding, first), *range(last + 1, last + padding + 1)]
+    if monthly:
+        extra_units = {(index // 12, index % 12 + 1) for index in extra_indices}
+    else:
+        extra_units = {(index, 1) for index in extra_indices}
+    return sorted(set(units_ym) | extra_units)
 
 
 def unit_columns(ds, labels, gran):
@@ -175,7 +168,7 @@ def _multi(img):
 
 
 def _table(fc, ds, comps, units, gran, buffer_m, temporal, spatial, region, crs=None):
-    """对一个数据源：合成各单位影像（只算一次）→ 叠成多波段影像 → 一次 reduceRegions 取出所有点的值。"""
+    """把各年或月的合成影像叠成多波段，一次提取整批点。"""
     if ds.kind == "vector":
         return _vector_props(fc, ds, comps, region)
     sp = getattr(ee.Reducer, ds.spatial or spatial)()
@@ -195,7 +188,11 @@ def _table(fc, ds, comps, units, gran, buffer_m, temporal, spatial, region, crs=
 
 
 def _rel_units(units_ym, gran):
-    return [(y, m, _label(gran, y, m), f"__{_label(gran, y, m)}") for y, m in units_ym]
+    units = []
+    for year, month in units_ym:
+        label = _label(gran, year, month)
+        units.append((year, month, label, f"__{label}"))
+    return units
 
 
 def _apply_seq(fc, datasets, comps, buffer_m, periods, temporal, spatial, region, crs=None):
@@ -446,7 +443,6 @@ def run(df, lon_col, lat_col, date_col, datasets, buffer_m, mode, windows, perio
         log(f"⚠️ 输入表里已有 {len(dup)} 个同名列（如 {dup[0]}），将被本次结果覆盖（移到表尾）")
     out = df.drop(columns=["_lon", "_lat", "_date"] + dup).merge(res[["_row"] + cols], on="_row", how="left").drop(columns="_row")
     out.to_csv(out_csv, index=False, encoding="utf-8-sig")
-    import json
     meta = {"时间粒度": {"year": "年度", "month": "月度"}[gran], "模式": "回溯窗口" if mode == "rel" else "时间段序列",
             "窗口": windows if mode == "rel" else [p[0] for p in periods], "缓冲区(m)": buffer_m,
             "处理方式": "先按年/月合成并在每个点提取，再在点上汇总各窗口（空间聚合在前，时间聚合在后）",

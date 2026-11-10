@@ -1,4 +1,5 @@
-"""公共工具函数（核心运行工具）。"""
+"""日志、网络重试和本地设置的辅助函数。"""
+
 import functools
 import logging
 import os
@@ -8,10 +9,7 @@ import traceback
 from datetime import datetime
 
 
-# ---- 控制台编码保护 ----
-# Windows 默认控制台常为 GBK，print 含 emoji/生僻字符时可能抛
-# UnicodeEncodeError。这里给 stdout/stderr 加上 errors="replace"，
-# 让不可编码字符被替换而非崩溃（中文显示不受影响）。
+# Windows 的 GBK 控制台用替代字符显示无法编码的日志内容。
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(errors="replace")
@@ -20,12 +18,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 
 def make_logger(callback=None):
-    """创建一个 log 函数，有 callback 时转发，否则 print。
-
-    用法:
-        log = make_logger(log_callback)
-        log("消息内容")
-    """
+    """把消息交给回调，未提供回调时打印到控制台。"""
     def log(msg):
         if callback:
             callback(msg)
@@ -35,13 +28,7 @@ def make_logger(callback=None):
 
 
 class FileLogger:
-    """同时写入文件、GUI 回调、标准输出的日志器。
-
-    用法:
-        fl = FileLogger("logs/", log_callback)
-        fl.log("消息")
-        # 或用作 callback: log_callback=fl.log
-    """
+    """写入会话日志，必要时同步到界面或控制台。"""
 
     def __init__(self, log_dir="logs", gui_callback=None):
         os.makedirs(log_dir, exist_ok=True)
@@ -65,7 +52,6 @@ class FileLogger:
         return self._log_path
 
     def log(self, msg):
-        """记录一条消息（可作为 callback 直接传递）。"""
         self._logger.info(msg)
         if self._gui_cb:
             self._gui_cb(msg)
@@ -85,23 +71,11 @@ class FileLogger:
             self._gui_cb(f"❌ {msg}")
 
 
-# ==================== 网络重试 ====================
-
 def retry_on_network_error(max_retries=3, base_delay=1.0, backoff=2.0):
-    """网络请求重试装饰器。
+    """请求失败时按指数退避重试，耗尽后抛出最后一次异常。
 
-    在 requests.RequestException 或 ee.EEException 上自动重试，
-    使用指数退避策略。重试耗尽后抛出原始异常。
-
-    Args:
-        max_retries: 最大重试次数（不含首次调用）
-        base_delay: 首次重试等待秒数
-        backoff: 退避倍数
-
-    用法:
-        @retry_on_network_error(max_retries=3)
-        def fetch_data():
-            return requests.get(url, timeout=10)
+    max_retries 从首次失败后开始计数。首次等待 base_delay 秒，
+    后续等待时间乘以 backoff。
     """
     import requests as _requests
     try:
@@ -132,38 +106,23 @@ def retry_on_network_error(max_retries=3, base_delay=1.0, backoff=2.0):
     return decorator
 
 
-# ==================== 密钥混淆存储 ====================
-
 def _get_machine_salt():
-    """获取机器相关的盐值（用于密钥混淆）。
-
-    使用计算机名 + 用户名 + 固定应用密钥组合，确保同一台机器上每次
-    启动 Python 都能得到相同的盐值。
-    不再使用 uuid.getnode()——在某些 Windows 系统上它可能返回随机值。
-
-    注意：这是混淆（obfuscation）而非加密（encryption）。
-    任何有权限读取本机文件的人都可以逆向出原始密钥。
-    如需真正的安全存储，请使用 Windows 凭据管理器或 keyring 库。
-    """
+    """用计算机名和用户名生成可重复的盐值，供本地设置混淆使用。"""
     import hashlib
     import os as _os
     parts = [
         _os.environ.get("COMPUTERNAME", ""),
         _os.environ.get("USERNAME", ""),
-        "UrbanAnalysisApp.FixedSalt.2026",  # 固定应用密钥
+        "UrbanAnalysisApp.FixedSalt.2026",
     ]
     combined = "|".join(parts)
     return hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
 
 def obfuscate(text):
-    """对文本进行简单混淆（Base64 + XOR）。
-
-    警告：仅用于防止明文存储，不提供真正的加密安全。
-    """
+    """用 XOR 和 Base64 避免明文存储。此格式可逆，不能用于加密。"""
     import base64
     salt = _get_machine_salt()
-    # XOR each character with repeating salt bytes
     salt_bytes = salt.encode("utf-8")
     text_bytes = text.encode("utf-8")
     result = bytearray()
@@ -173,11 +132,7 @@ def obfuscate(text):
 
 
 def deobfuscate(encoded):
-    """反向解混淆。
-
-    Returns:
-        原始文本，或空字符串（解码失败时）。
-    """
+    """恢复原始文本，解码失败时返回空字符串。"""
     import base64
     try:
         salt = _get_machine_salt()
@@ -192,48 +147,21 @@ def deobfuscate(encoded):
 
 
 def secure_store(key, value):
-    """安全存储敏感值（混淆后保存到文件）。
-
-    Args:
-        key: 键名
-        value: 要存储的值（明文）
-
-    Returns:
-        混淆后的值（可直接存入 QSettings）
-    """
+    """返回可存入 QSettings 的混淆值，保留 key 参数以兼容调用方。"""
     if not value:
         return ""
     return obfuscate(value)
 
 
 def secure_load(key, obfuscated_value):
-    """从混淆值恢复明文。
-
-    Args:
-        key: 键名（保留用于未来扩展）
-        obfuscated_value: 混淆后的字符串
-
-    Returns:
-        原始明文值
-    """
+    """恢复 QSettings 中的混淆值，保留 key 参数以兼容调用方。"""
     if not obfuscated_value:
         return ""
     return deobfuscate(obfuscated_value)
 
 
 def safe_call(func, *args, default=None, log_func=None, **kwargs):
-    """安全调用函数，捕获常见异常并记录。
-
-    Args:
-        func: 要调用的函数
-        *args: 位置参数
-        default: 异常时返回的默认值
-        log_func: 日志回调
-        **kwargs: 关键字参数
-
-    Returns:
-        func 的返回值，或 default（发生异常时）
-    """
+    """调用 func，发生异常时记录错误并返回 default。"""
     try:
         return func(*args, **kwargs)
     except Exception as e:

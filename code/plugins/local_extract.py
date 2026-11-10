@@ -1,12 +1,12 @@
-# -*- coding: utf-8 -*-
-"""本地栅格库的点位提取引擎：与 GEE 提取同一套口径（缓冲区/像元、回溯窗口/时间段序列、年/月粒度、时间与空间聚合）。
+"""从本地栅格库提取点位或缓冲区的指标。
 
-数据来自「栅格数据目录」里的各数据序列（COG）。读取一律用窗口，不整图读入。
-数值 = 原始值 × scale + offset（来自各序列的 dataset.json）；无效值不参与；缺失的期不参与，全缺则输出为空。
+按窗口读取 COG，按 dataset.json 中的 scale 和 offset 换算数值。
+聚合时跳过无效值和缺失期。
 """
 import json
 import math
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -40,7 +40,7 @@ def _fd_limit():
         return 256
 
 
-# 每个线程缓存已打开的栅格文件。月序列一个点的窗口要用几十个文件，缓存装不下就会反复打开（外置硬盘上慢 20 倍）
+# 月度窗口会反复访问同一批栅格，在线程内复用文件句柄可减少外置硬盘 I/O。
 _CACHE_CAP = 200 if _fd_limit() >= 4096 else 48
 
 
@@ -245,29 +245,26 @@ def _spatial(arr, mask, red):
     return _mode(v) if red == "mode" else float(np.median(v) if red == "median" else np.mean(v))
 
 
-# ---------------------------------------------------------------- 矢量面数据（如行政区划）：点在面内
-import re as _re
-
-_ATTR = _re.compile(r"^\s*([^\[\|\s]+)\s*(?:\[(\d*):(\d*)\])?\s*(?:\|\s*(\w+)(?::(\w+))?)?\s*$")
+_ATTR = re.compile(r"^\s*([^\[\|\s]+)\s*(?:\[(\d*):(\d*)\])?\s*(?:\|\s*(\w+)(?::(\w+))?)?\s*$")
 
 
 def eval_attr(df, expr, folder=None):
     """属性表达式：字段名，可带切片和查表。如 name、gb[3:9]、gb[3:5]|cn_province、gb[3:7]|table:city。
     table:xxx 读取数据序列文件夹里的 lookup_xxx.csv（两列：code, name）。"""
     from core.admin_cn import LOOKUPS
-    m = _ATTR.match(expr)
-    if not m:
+    match = _ATTR.match(expr)
+    if not match:
         raise ValueError(f"属性映射表达式无法解析：{expr}")
-    fld, a, b, lk, arg = m.groups()
-    ser = df[fld].astype(str)
-    if a or b:
-        ser = ser.str.slice(int(a) if a else None, int(b) if b else None)
-    if lk == "table":
-        t = pd.read_csv(Path(folder) / f"lookup_{arg}.csv", dtype=str, encoding="utf-8-sig")
-        ser = ser.map(dict(zip(t["code"], t["name"])))
-    elif lk:
-        ser = ser.map(LOOKUPS[lk])
-    return ser
+    field, start, end, lookup, table_name = match.groups()
+    values = df[field].astype(str)
+    if start or end:
+        values = values.str.slice(int(start) if start else None, int(end) if end else None)
+    if lookup == "table":
+        table = pd.read_csv(Path(folder) / f"lookup_{table_name}.csv", dtype=str, encoding="utf-8-sig")
+        values = values.map(dict(zip(table["code"], table["name"])))
+    elif lookup:
+        values = values.map(LOOKUPS[lookup])
+    return values
 
 
 def vector_columns(s):
